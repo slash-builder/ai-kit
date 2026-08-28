@@ -21,8 +21,8 @@
 //! - Integration with Storage Kit once available.
 //! - Versioning semantics (SemVer resolver for app dependencies).
 
-use crate::types::ModelMetadata;
 use crate::error::Result;
+use crate::types::ModelMetadata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -84,7 +84,8 @@ impl ModelRegistry {
     /// Implement full YAML parsing. Currently a placeholder.
     pub fn load_from_file(_path: &str) -> Result<ModelRegistry> {
         Err(crate::error::AiKitError::Internal {
-            reason: "ModelRegistry::load_from_file not yet implemented (awaiting YAML parsing)".to_string(),
+            reason: "ModelRegistry::load_from_file not yet implemented (awaiting YAML parsing)"
+                .to_string(),
         })
     }
 

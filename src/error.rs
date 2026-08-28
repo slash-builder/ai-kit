@@ -26,10 +26,7 @@ pub enum AiKitError {
 
     /// Inference operation timed out.
     #[error("Inference timeout on model {model_id} after {timeout_ms}ms")]
-    InferenceTimeout {
-        model_id: String,
-        timeout_ms: u32,
-    },
+    InferenceTimeout { model_id: String, timeout_ms: u32 },
 
     /// KV cache for session was evicted due to memory pressure or TTL.
     #[error("KV cache evicted for session {session_id}")]
@@ -39,7 +36,9 @@ pub enum AiKitError {
     ///
     /// Per decision memo #7: App must handle fallback explicitly (Message Kit to Cumulus
     /// or accept lower quantization). Implicit downgrade violates app's accuracy SLA.
-    #[error("Quantization {quantization} not available for model {model_id}; available: {available:?}")]
+    #[error(
+        "Quantization {quantization} not available for model {model_id}; available: {available:?}"
+    )]
     QuantizationUnsupported {
         model_id: String,
         quantization: String,
@@ -72,10 +71,7 @@ pub enum AiKitError {
 
     /// Session cache state is inconsistent (internal error).
     #[error("Session cache inconsistency for {session_id}: {reason}")]
-    CacheInconsistency {
-        session_id: String,
-        reason: String,
-    },
+    CacheInconsistency { session_id: String, reason: String },
 
     /// Capability grant check failed or is missing.
     ///

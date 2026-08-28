@@ -180,10 +180,7 @@ impl ModelCache {
 
     /// List all cached models.
     pub fn list(&self) -> Vec<Arc<LoadedModel>> {
-        self.models
-            .values()
-            .map(|m| Arc::new(m.clone()))
-            .collect()
+        self.models.values().map(|m| Arc::new(m.clone())).collect()
     }
 
     /// Total size of all cached models (bytes).
@@ -236,9 +233,9 @@ impl KvCacheManager {
         model_hash: ModelHash,
         app_id: AppId,
     ) -> &mut KvCache {
-        self.caches.entry(session_id.clone()).or_insert_with(|| {
-            KvCache::new(session_id, model_hash, app_id)
-        })
+        self.caches
+            .entry(session_id.clone())
+            .or_insert_with(|| KvCache::new(session_id, model_hash, app_id))
     }
 
     /// Get a KvCache (read-only).
@@ -307,10 +304,7 @@ mod tests {
 
     #[test]
     fn test_loaded_model_new() {
-        let model = LoadedModel::new(
-            "blake3-hash".to_string(),
-            vec![1, 2, 3, 4, 5],
-        );
+        let model = LoadedModel::new("blake3-hash".to_string(), vec![1, 2, 3, 4, 5]);
         assert_eq!(model.hash, "blake3-hash");
         assert_eq!(model.size_bytes(), 5);
         assert_eq!(model.ref_count, 0);
@@ -319,10 +313,7 @@ mod tests {
     #[test]
     fn test_model_cache_insert_and_get() {
         let mut cache = ModelCache::new();
-        let model = LoadedModel::new(
-            "hash1".to_string(),
-            vec![1, 2, 3],
-        );
+        let model = LoadedModel::new("hash1".to_string(), vec![1, 2, 3]);
         cache.insert(model);
 
         assert_eq!(cache.len(), 1);
@@ -336,7 +327,8 @@ mod tests {
             SessionId::new(),
             "model-hash".to_string(),
             "app1".to_string(),
-        ).with_ttl(1); // 1ms TTL
+        )
+        .with_ttl(1); // 1ms TTL
 
         // Cache should not expire immediately
         assert!(!cache.is_expired());
@@ -348,7 +340,11 @@ mod tests {
         let session_id = SessionId::new();
 
         // Create a cache
-        mgr.get_or_create(session_id.clone(), "model-hash".to_string(), "app1".to_string());
+        mgr.get_or_create(
+            session_id.clone(),
+            "model-hash".to_string(),
+            "app1".to_string(),
+        );
         assert_eq!(mgr.len(), 1);
 
         // Get it back
@@ -368,7 +364,11 @@ mod tests {
         let session_id = SessionId::from_string("session1".to_string());
 
         // App1 uses session1 with model A
-        mgr.get_or_create(session_id.clone(), "model-a".to_string(), "app1".to_string());
+        mgr.get_or_create(
+            session_id.clone(),
+            "model-a".to_string(),
+            "app1".to_string(),
+        );
 
         // Verify cache belongs to app1
         if let Some(cache) = mgr.get(&session_id) {
