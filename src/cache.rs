@@ -236,7 +236,7 @@ impl KvCacheManager {
         model_hash: ModelHash,
         app_id: AppId,
     ) -> &mut KvCache {
-        self.caches.entry(session_id).or_insert_with(|| {
+        self.caches.entry(session_id.clone()).or_insert_with(|| {
             KvCache::new(session_id, model_hash, app_id)
         })
     }

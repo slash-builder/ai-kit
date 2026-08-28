@@ -12,9 +12,10 @@ categories = ["machine-learning", "command-line-utilities"]
 [lib]
 path = "src/lib.rs"
 
-[[bin]]
-name = "ai-kit-cli"
-path = "src/bin/cli.rs"
+# [[bin]]
+# name = "ai-kit-cli"
+# path = "src/bin/cli.rs"
+# TODO: CLI tool for testing/debugging (deferred)
 
 [dependencies]
 # Core async runtime

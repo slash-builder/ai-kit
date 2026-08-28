@@ -5,7 +5,6 @@
 //! AI Kit errors map cleanly to Hearth ErrorCode enum for protocol-level errors.
 //! See: https://github.com/slash-builder/message-kit/blob/main/proto/quickring/v1/message.proto
 
-use std::fmt;
 use thiserror::Error;
 
 /// Result type for AI Kit operations.
