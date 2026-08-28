@@ -1,0 +1,74 @@
+[package]
+name = "ai-kit"
+version = "0.1.0"
+authors = ["Douglas Lockamy <dlockamy@lockamystudios.com>"]
+edition = "2021"
+description = "AI Kit — trait-based local inference orchestration for Hearth household clusters. Models are immutable OS resources; inference is household-scoped with capability gating via Score Kit."
+repository = "https://github.com/slash-builder/ai-kit"
+license = "Apache-2.0"
+keywords = ["inference", "llm", "household", "hearth", "kit"]
+categories = ["machine-learning", "command-line-utilities"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ai-kit-cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1", features = ["rt", "macros", "io-util", "fs", "sync"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Hashing (BLAKE3 for model integrity)
+blake3 = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Storage Kit integration (models as artifacts)
+# storage-kit = { path = "../storage-kit" }  # Uncomment when storage-kit is ready
+
+# Service Kit integration (observability)
+# service-kit = { path = "../service-kit" }  # Uncomment when service-kit is ready
+
+# Score Kit integration (capability grants)
+# score-kit = { path = "../score-kit" }  # Uncomment when score-kit is ready
+
+# Message Kit integration (async fallback over Hearth)
+# message-kit = { path = "../message-kit" }  # Uncomment when message-kit is available
+# prost = "0.12"
+# prost-types = "0.12"
+
+# ML framework (Candle primary, TFLite secondary)
+# candle = { version = "0.1", features = ["cuda"] }  # Optional CUDA support
+# tflite = "0.1"  # Optional TensorFlow Lite
+
+# Utility
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+memmap2 = "0.9"  # For RO mmap of model weights
+
+[dev-dependencies]
+# Test fixtures
+tokio-test = "0.4"
+tempfile = "3"
+mockall = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
