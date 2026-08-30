@@ -4,7 +4,13 @@
 def RUST_IMAGE = 'rust:1.94'
 
 pipeline {
-  agent any
+  // Pinned (not `any`): Build & Test and Publish both run a docker { reuseNode true }
+  // sub-agent, which reuses whatever node this top-level agent lands on. `agent any`
+  // let that land on any idle executor, including win32/saturn — hosts with no docker
+  // binary — which fails immediately with "docker: command not found" (reproduced on
+  // saturn in build #2, 2026-08-30). Pin to linux-build so the container-based legs are
+  // deterministic.
+  agent { label 'linux-build' }
 
   environment {
     NEXUS_URL  = 'https://nexus.softsurve.com'
