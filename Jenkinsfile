@@ -32,15 +32,100 @@ pipeline {
     }
 
     stage('Build & Test') {
-      agent { docker { image RUST_IMAGE; reuseNode true } }
-      steps {
-        sh '''
-          rustup component add rustfmt clippy
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test
-          cargo build --release
-        '''
+      parallel {
+
+        stage('linux-amd64') {
+          // Unchanged from the pre-matrix pipeline: pinned rust:1.94 container,
+          // reuses the linux-build node this pipeline is now pinned to.
+          agent { docker { image RUST_IMAGE; reuseNode true } }
+          steps {
+            sh '''
+              rustup component add rustfmt clippy
+              cargo fmt --check
+              cargo clippy --all-targets -- -D warnings
+              cargo test
+              cargo build --release
+            '''
+          }
+        }
+
+        stage('linux-arm64 (cross-compile)') {
+          // No native Linux arm64 agent exists yet. AI Kit has no ML-framework
+          // native deps wired in today — Candle/TFLite/ONNX are all still
+          // commented out in Cargo.toml (see Cargo.toml lines ~55-57) — so the
+          // dependency graph is pure Rust + serde/tokio/blake3/memmap2, which
+          // cross-compiles cleanly from the existing linux-build agent. Revisit
+          // this leg (native arm64 agent, or drop cross-compilation) once a real
+          // inference backend with native/GPU deps lands; that may no longer
+          // cross-compile cleanly.
+          //
+          // Build-only: a cross-compiled aarch64 binary can't execute on this
+          // amd64 host without an emulator (no qemu-user/binfmt assumed here),
+          // so `cargo test` is not run for this leg.
+          agent { docker { image RUST_IMAGE; reuseNode true } }
+          steps {
+            sh '''
+              rustup target add aarch64-unknown-linux-gnu
+              # Both packages are required: gcc-aarch64-linux-gnu alone is not enough —
+              # blake3's C NEON implementation (blake3_neon.c) needs the aarch64 cross
+              # sysroot headers too, or cc-rs fails with "bits/wordsize.h: No such file".
+              # Verified locally (rust:1.94) 2026-08-29: fails with only gcc-aarch64-linux-gnu,
+              # succeeds with libc6-dev-arm64-cross added.
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+                gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+              cargo build --release --target aarch64-unknown-linux-gnu
+            '''
+          }
+        }
+
+        stage('windows-amd64') {
+          // KNOWN BROKEN as of 2026-08-29: the win32 agent's `checkout scm` fails with
+          // a git auth error before any pipeline step runs — pre-existing, agent-level,
+          // affects every kit that builds on win32, not specific to ai-kit's Jenkinsfile.
+          // Out of scope to fix here (Sol/Jenkins agent config, not this repo). Wrapped in
+          // catchError so this leg's failure is visible per-stage but does not block the
+          // linux-amd64 leg or the Publish stage below — otherwise Nexus publishing would
+          // be silently blocked by infrastructure this repo doesn't control.
+          agent { label 'win32' }
+          steps {
+            catchError(message: 'windows-amd64: known win32 checkout-scm/git-auth issue (agent-level, out of scope)', stageResult: 'FAILURE') {
+              bat '''
+                rustup component add rustfmt clippy
+                cargo fmt --check || exit /b 1
+                cargo clippy --all-targets -- -D warnings || exit /b 1
+                cargo test || exit /b 1
+                cargo build --release || exit /b 1
+              '''
+            }
+          }
+        }
+
+        stage('macos-arm64') {
+          // KNOWN BROKEN as of 2026-08-29, two independent issues, both agent-level and
+          // out of scope for this repo:
+          //   1. Same checkout-scm/git-auth failure as win32 — fails before any step runs.
+          //   2. No Rust toolchain on PATH on saturn even once checkout is fixed.
+          // saturn also has a separate, longer-standing history of flakiness/going offline;
+          // if a build hangs waiting for allocation here, that's a known infra issue too —
+          // the documented unblock is cancelling the stuck queue item via
+          // /queue/cancelItem?id=<id>, not debugging this stage. Wrapped in catchError for
+          // the same reason as windows-amd64: don't let known-broken agent infra silently
+          // block Nexus publish.
+          agent { label 'saturn' }
+          steps {
+            catchError(message: 'macos-arm64: known saturn checkout-scm/toolchain issues (agent-level, out of scope)', stageResult: 'FAILURE') {
+              sh '''
+                rustup component add rustfmt clippy
+                cargo fmt --check
+                cargo clippy --all-targets -- -D warnings
+                cargo test
+                cargo build --release
+              '''
+            }
+          }
+        }
+
       }
     }
 
