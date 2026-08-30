@@ -1,0 +1,17 @@
+# CODEOWNERS — required reviewers for pull requests.
+#
+# Format reference:
+#   https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-configuration/customizing-your-repository/about-code-owners
+#
+# To make this file enforceable, configure branch protection on `main`:
+#   Settings → Branches → Add rule for `main`
+#     ☑ Require a pull request before merging
+#     ☑ Require approvals (1)
+#     ☑ Require review from Code Owners
+#     ☑ Dismiss stale pull request approvals when new commits are pushed
+#     ☑ Require status checks to pass before merging
+#
+# The pattern below applies repository-wide. Add more specific rules above it
+# if a path needs a different reviewer set; CODEOWNERS uses last-match-wins.
+
+*                  @dlockamy
