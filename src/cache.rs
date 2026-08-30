@@ -113,7 +113,7 @@ impl KvCache {
             cache_data: Vec::new(),
             created_at: now,
             last_used_at: now,
-            ttl_ms: 3600_000, // 1 hour default TTL
+            ttl_ms: 3_600_000, // 1 hour default TTL
         }
     }
 
