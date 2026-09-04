@@ -68,11 +68,14 @@ Implementation can proceed on locked constraints; these are design decisions, no
 - **`src/registry.rs`**: Model discovery from OS catalog (/usr/share/models/catalog.yaml).
 - **`src/cache.rs`**: Two-layer cache (model weights + per-session KV).
 
+### Implemented (POC scope)
+
+- **`src/bin/cli.rs`**: `ai-kit-cli` — `hash`/`infer`/`cache-stats` subcommands. See README "Local Dev Inference (POC)".
+- **`src/backends/candle.rs`**: `CandleInferenceService`, feature-gated behind `candle`. CPU-only, single small GGUF model (TinyLlama by default), real generation honoring temperature/top_p/max_tokens. **POC limitations**: no cross-call transformer KV-cache reuse (each `infer()` is a fresh generation); model fetched via `scripts/fetch-model.sh` from Hugging Face at dev time (documented exception to invariant #2, never in a production build); not wired to Storage Kit, Device Kit, or Score Kit — this is the trait + a real backend, not the full MVP integration.
+
 ### Future (Stubs)
 
-- **`src/bin/cli.rs`**: CLI tool for testing (TODO).
 - **`src/proto/`**: Message Kit bindings (TODO, awaiting proto finalization).
-- **`src/backends/candle.rs`**: Candle ML framework integration (TODO).
 - **`src/backends/tflite.rs`**: TensorFlow Lite integration (TODO, optional).
 
 ## Integration Dependencies
@@ -96,7 +99,7 @@ Implementation can proceed on locked constraints; these are design decisions, no
 - [x] Types + error mapping.
 - [x] Model registry + catalog loader.
 - [x] Cache infrastructure (model + KV).
-- [ ] Candle bindings (in-process inference).
+- [x] Candle bindings (in-process inference) — POC scope: CPU-only, single small model, feature-gated (`--features candle`), local dev model fetch via `make fetch-model`. Real MVP integration (Storage Kit, Device Kit hints, multi-model catalog) still open.
 - [ ] Score Kit integration (capability checks).
 - [ ] Service Kit integration (observability).
 - [ ] Spec Kit conformance gate (CI validation).

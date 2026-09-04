@@ -26,6 +26,14 @@ use crate::types::ModelMetadata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// On-disk shape of `catalog.yaml`, matching the doc-commented example on
+/// [`ModelRegistry::load_from_file`] exactly.
+#[derive(Debug, Deserialize)]
+struct CatalogFile {
+    version: String,
+    models: Vec<ModelMetadata>,
+}
+
 /// Model registry (in-memory catalog, loaded from OS image).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRegistry {
@@ -79,14 +87,21 @@ impl ModelRegistry {
     ///       inference_latency_ms: 45
     /// ```
     ///
-    /// # TODO
+    /// # Errors
     ///
-    /// Implement full YAML parsing. Currently a placeholder.
-    pub fn load_from_file(_path: &str) -> Result<ModelRegistry> {
-        Err(crate::error::AiKitError::Internal {
-            reason: "ModelRegistry::load_from_file not yet implemented (awaiting YAML parsing)"
-                .to_string(),
-        })
+    /// - `AiKitError::Io` if the file can't be read.
+    /// - `AiKitError::YamlError` if the file doesn't parse to the shape above.
+    /// - Whatever [`ModelRegistry::validate`] returns, if any parsed model fails validation.
+    pub fn load_from_file(path: &str) -> Result<ModelRegistry> {
+        let contents = std::fs::read_to_string(path)?;
+        let catalog: CatalogFile = serde_yaml::from_str(&contents)?;
+
+        let mut registry = ModelRegistry::new(format!("file://{path}"), catalog.version);
+        for model in catalog.models {
+            registry.add(model);
+        }
+        registry.validate()?;
+        Ok(registry)
     }
 
     /// Look up a model by ID.
@@ -243,5 +258,85 @@ mod tests {
 
         reg.add(model);
         assert!(reg.validate().is_err());
+    }
+
+    #[test]
+    fn test_load_from_file_valid_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.yaml");
+        std::fs::write(
+            &path,
+            r#"
+version: "1.0"
+models:
+  - id: "test-model"
+    version: "1.0.0"
+    os_arch: ["x86_64", "aarch64"]
+    quantization_variants: ["q4", "q8"]
+    default_quantization: "q4"
+    hash: "blake3-abcd1234"
+    size_bytes: 1000000
+    location: "file:///dev-models/test-model/model.gguf"
+    metadata:
+      parameters: 1000000
+      context_window: 2048
+      vram_required_mb: 2048
+      inference_latency_ms: 50
+"#,
+        )
+        .unwrap();
+
+        let reg = ModelRegistry::load_from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(reg.catalog_version, "1.0");
+        assert_eq!(reg.len(), 1);
+        assert!(reg.has("test-model"));
+        assert_eq!(reg.get("test-model").unwrap().hash, "blake3-abcd1234");
+    }
+
+    #[test]
+    fn test_load_from_file_missing_file() {
+        let result = ModelRegistry::load_from_file("/nonexistent/catalog.yaml");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_file_malformed_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.yaml");
+        std::fs::write(&path, "this: [is, not: valid: yaml").unwrap();
+
+        let result = ModelRegistry::load_from_file(path.to_str().unwrap());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_file_invalid_model_fails_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.yaml");
+        // default_quantization "q16" is not in quantization_variants -> validate() should fail.
+        std::fs::write(
+            &path,
+            r#"
+version: "1.0"
+models:
+  - id: "test-model"
+    version: "1.0.0"
+    os_arch: ["x86_64"]
+    quantization_variants: ["q4"]
+    default_quantization: "q16"
+    hash: "blake3-abcd1234"
+    size_bytes: 1000000
+    location: "file:///dev-models/test-model/model.gguf"
+    metadata:
+      parameters: 1000000
+      context_window: 2048
+      vram_required_mb: 2048
+      inference_latency_ms: 50
+"#,
+        )
+        .unwrap();
+
+        let result = ModelRegistry::load_from_file(path.to_str().unwrap());
+        assert!(result.is_err());
     }
 }
