@@ -12,10 +12,12 @@ categories = ["machine-learning", "command-line-utilities"]
 [lib]
 path = "src/lib.rs"
 
-# [[bin]]
-# name = "ai-kit-cli"
-# path = "src/bin/cli.rs"
-# TODO: CLI tool for testing/debugging (deferred)
+[[bin]]
+name = "ai-kit-cli"
+path = "src/bin/cli.rs"
+# Always builds. `infer` requires the `candle` feature; without it, it exits
+# with an actionable message instead of failing to compile. `hash`/`cache-stats`
+# work unconditionally.
 
 [dependencies]
 # Core async runtime
@@ -52,15 +54,30 @@ anyhow = "1.0"
 # prost = "0.12"
 # prost-types = "0.12"
 
-# ML framework (Candle primary, TFLite secondary)
-# candle = { version = "0.1", features = ["cuda"] }  # Optional CUDA support
-# tflite = "0.1"  # Optional TensorFlow Lite
+# ML framework (Candle primary, TFLite secondary).
+# Optional + feature-gated (see [features] below) so the default `cargo
+# build`/`cargo test` (what Jenkinsfile runs, no flags) never touches these —
+# only `--features candle` pulls them in. CPU-only on purpose: no cuda/metal/
+# accelerate features, so the build is uniform across macOS and Linux.
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
+# tflite = "0.1"  # Optional TensorFlow Lite, still deferred
 
 # Utility
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 memmap2 = "0.9"  # For RO mmap of model weights
+
+[features]
+default = []
+# Real local inference via Candle (POC). Off by default: keeps CI
+# (Jenkinsfile: cargo test / fmt / clippy / build --release, no flags)
+# untouched, since it pulls a real ML toolchain + requires `make fetch-model`
+# to have downloaded weights for anything beyond `cargo build` to be useful.
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
 
 [dev-dependencies]
 # Test fixtures

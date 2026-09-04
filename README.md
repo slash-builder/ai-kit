@@ -10,8 +10,9 @@ AI Kit provides a framework-agnostic inference API for Hearth devices. Models ar
 
 - ✅ Unified design doc (`context/projects/ai-kit-unified-design.md`)
 - ✅ Decision memos for DJ ruling (`context/ai-kit-decision-memos.md`)
-- 🚧 Core trait definition (this repo)
-- ⏳ Candle integration (blocked on framework binding)
+- ✅ Core trait definition (this repo)
+- ✅ Model registry (real YAML catalog loading)
+- ✅ Candle integration — **local dev POC** (see "Local Dev Inference (POC)" below); not the full MVP integration (no Storage Kit, Device Kit hints, or Score Kit wiring yet)
 - ⏳ Message Kit transport (blocked on proto finalization)
 - ⏳ Storage Kit integration (blocked on storage-kit v2)
 
@@ -47,6 +48,34 @@ let params = InferenceParams {
 let response = service.infer(params).await?;
 println!("Completion: {}", response.completion);
 ```
+
+## Local Dev Inference (POC)
+
+**This is a deliberate, documented exception to invariant #2** ("no weights
+over network"). Production models ship signed in the OS image and are never
+fetched at runtime. For local development — testing the trait, the registry,
+the cache, and now a real inference backend without BenixOS, Storage Kit, or
+an OS image — `--features candle` adds a `CandleInferenceService` backend
+that downloads a small quantized model from Hugging Face onto your dev
+machine. That download only ever happens via `make fetch-model`, is gitignored
+(`dev-models/`), and is never part of any production build or boot path.
+
+```bash
+make fetch-model                 # downloads TinyLlama-1.1B-Chat (GGUF, ~700MB) into dev-models/
+cargo build --features candle
+cargo run --features candle --bin ai-kit-cli -- infer \
+    --model tinyllama --prompt "What is the capital of France?"
+```
+
+Without `--features candle`, `ai-kit-cli infer` still builds and runs — it
+exits with a message telling you to rebuild with the feature, rather than
+failing to compile. `ai-kit-cli hash <path>` and `cache-stats` work either way.
+
+**Known POC limitations** (see `AGENT.md` for the full list): each `infer()`
+call runs a fresh generation — there's no cross-call transformer KV-cache
+reuse at the Candle level (`KvCacheManager` still tracks session bookkeeping/
+TTL, just not real tensor state); CPU-only, no CUDA/Metal; single small model,
+not the full model catalog / quantization-fallback story described below.
 
 ## Architecture
 
