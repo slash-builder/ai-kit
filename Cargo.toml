@@ -65,6 +65,13 @@ candle-transformers = { version = "0.9", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
 # tflite = "0.1"  # Optional TensorFlow Lite, still deferred
 
+# Remote proxy backend (Claude/Anthropic Messages API). Optional + feature-gated
+# (see [features] below), same discipline as `candle`: off by default, so the
+# default `cargo build`/`cargo test` never touches it. `default-features =
+# false` + explicit `rustls-tls` avoids pulling in native-tls/OpenSSL, matching
+# this crate's "uniform across macOS/Linux" build discipline.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
+
 # Utility
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -79,11 +86,22 @@ default = []
 # to have downloaded weights for anything beyond `cargo build` to be useful.
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
 
+# Remote proxy backend binding InferenceService to a third-party cloud API
+# (Claude/Anthropic Messages API first). This is explicitly a v0.2+/
+# experimental feature per decision memos #2 and #9 in
+# `ai-kit-unified-design.md` (remote fallback scope, hub relay auth) — both
+# still open, no DJ ruling yet. Off by default for the same reason `candle`
+# is: keeps CI (Jenkinsfile, no flags) untouched. Even compiled in, this
+# backend is inert without an explicit non-empty API key at construction
+# time — see `src/backends/claude_proxy.rs` module doc.
+claude-proxy = ["dep:reqwest"]
+
 [dev-dependencies]
 # Test fixtures
 tokio-test = "0.4"
 tempfile = "3"
 mockall = "0.12"
+wiremock = "0.6"
 
 [profile.release]
 opt-level = 3
