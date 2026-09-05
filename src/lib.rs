@@ -60,7 +60,7 @@
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 
-#[cfg(feature = "candle")]
+#[cfg(any(feature = "candle", feature = "claude-proxy"))]
 pub mod backends;
 pub mod cache;
 pub mod error;
@@ -71,6 +71,8 @@ pub mod types;
 // Re-export key types at crate root
 #[cfg(feature = "candle")]
 pub use backends::CandleInferenceService;
+#[cfg(feature = "claude-proxy")]
+pub use backends::{ClaudeProxyConfig, ClaudeProxyInferenceService};
 pub use error::{AiKitError, Result};
 pub use service::InferenceService;
 pub use types::{InferenceParams, InferenceResponse, ModelMetadata};

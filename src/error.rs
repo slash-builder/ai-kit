@@ -80,6 +80,17 @@ pub enum AiKitError {
     #[error("Capability check failed for app {app_id} on model {model_id}")]
     CapabilityDenied { app_id: String, model_id: String },
 
+    /// A remote proxy backend (e.g. the `claude-proxy` feature's Anthropic
+    /// binding) failed: network/transport failure, a non-2xx HTTP response,
+    /// or a response body that didn't match the expected shape.
+    ///
+    /// Distinct from [`AiKitError::Internal`] on purpose: this is an
+    /// *external* dependency failing, not an AI Kit bug, and callers
+    /// (Message Kit transport, dashboards) may want to treat the two
+    /// differently (e.g. retry/backoff heuristics for the former only).
+    #[error("Remote backend '{backend}' request failed: {reason}")]
+    RemoteBackendError { backend: String, reason: String },
+
     /// Generic internal error.
     #[error("Internal error: {reason}")]
     Internal { reason: String },
@@ -108,7 +119,7 @@ impl AiKitError {
     /// - `QuantizationUnsupported` → 23 (QUANTIZATION_UNSUPPORTED)
     /// - `InferenceOom` → 24 (INFERENCE_OOM)
     /// - `CapabilityDenied` → 13 (PERMISSION_DENIED)
-    /// - others → 90 (INTERNAL)
+    /// - others (including `RemoteBackendError`, no dedicated code allocated yet) → 90 (INTERNAL)
     ///
     /// TODO: Once messaging-architect confirms the error code allocations, pin these values.
     pub fn to_error_code(&self) -> i32 {

@@ -77,6 +77,54 @@ reuse at the Candle level (`KvCacheManager` still tracks session bookkeeping/
 TTL, just not real tensor state); CPU-only, no CUDA/Metal; single small model,
 not the full model catalog / quantization-fallback story described below.
 
+## Cloud Proxy Inference — Claude/Anthropic (experimental, not yet ruled on)
+
+**This is explicitly a `v0.2+` feature, off by default, and not yet blessed
+for a real household product.** `ai-kit-unified-design.md`'s decision memos
+#2 ("remote fallback scope — does it include Quickring cloud hub?") and #9
+("hub relay authentication") are both still open — no DJ ruling. Sending
+prompt text (not model weights) to a third-party cloud API is a real
+data-egress decision that needs a security-engineer/DJ privacy ruling before
+this goes beyond a dev POC, exactly the same caveat this repo already
+applies to Candle's network-fetch-at-dev-time exception above.
+
+`--features claude-proxy` adds `ClaudeProxyInferenceService`, a second
+`InferenceService` implementation that proxies `infer()` to Anthropic's
+Messages API (`POST /v1/messages`) instead of running local Candle
+inference — same trait, same call site, no change to caller code. This
+mirrors the pattern Apple's Foundation Models framework adopted at WWDC
+2026 (a single `LanguageModelSession`-style call site bindable to on-device,
+Private Cloud Compute, or a third-party provider via a provider/fallback
+parameter) — cited here as precedent for the *shape*, not copied from. See
+`src/backends/claude_proxy.rs`'s module doc for the full caveat, including a
+note that a live web search during this backend's development could not
+independently corroborate the specific Apple/Anthropic/Gemini framework
+claim beyond WWDC 2026 coverage of Gemini-powered Siri.
+
+Even with the feature compiled in, this backend is inert without an
+explicit API key — `ClaudeProxyInferenceService::new` fails fast on an empty
+key, so enabling the feature alone cannot send anything anywhere.
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...   # your own key; never committed
+cargo build --features claude-proxy
+```
+
+```rust
+use ai_kit::{ClaudeProxyConfig, ClaudeProxyInferenceService, InferenceService};
+
+let service = ClaudeProxyInferenceService::new(ClaudeProxyConfig {
+    api_key: std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not set"),
+    base_url: None, // defaults to https://api.anthropic.com
+})?;
+```
+
+**Known limitations** (deliberate, to fit the existing trait's single-shot
+shape): no streaming, no tool use / function calling, no multi-turn
+conversation — each `infer()` call is one independent request/response, and
+`quantization` in the response is always the literal `"n/a (cloud proxy)"`
+since there's no local weight file to quantize.
+
 ## Architecture
 
 ```

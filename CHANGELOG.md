@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `ClaudeProxyInferenceService` (`src/backends/claude_proxy.rs`), feature-gated
+  behind `claude-proxy` (off by default): an `InferenceService` backend that
+  proxies `infer()` to Anthropic's Messages API. **Experimental, v0.2+ scope
+  per decision memos #2/#9 — not yet ruled on for a real household product.**
+  Inert without an explicit `api_key`. See README "Cloud Proxy Inference —
+  Claude/Anthropic" and the module's own doc comment for the full caveat.
 - Initial Rust crate scaffold (v0.1.0-dev).
 - `InferenceService` trait (frozen ABI for trait-based API).
 - Core types: `ModelMetadata`, `InferenceParams`, `InferenceResponse`, `SessionId`.
