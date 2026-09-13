@@ -14,7 +14,15 @@ pipeline {
 
   environment {
     NEXUS_URL  = 'https://nexus.softsurve.com'
-    CARGO_HOME = "${WORKSPACE}/.cargo"
+    // RELATIVE on purpose -- do not restore `"${WORKSPACE}/.cargo"`.
+    // That interpolates ONCE against the top-level agent's workspace, but
+    // docker stages bind-mount only their own workspace, and under
+    // concurrency Jenkins allocates `<job>@2`. The baked path then names a
+    // directory not mounted in the container, and cargo dies with
+    // "Read-only file system (os error 30)". Root-caused on message-kit
+    // PR-14 builds 3/4, 2026-09-12. Cargo resolves a relative CARGO_HOME
+    // against cwd, and no step here uses `cd`. (CI hardening 2026-09-13)
+    CARGO_HOME = '.cargo'
   }
 
   stages {
