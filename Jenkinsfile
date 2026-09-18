@@ -70,7 +70,14 @@ pipeline {
           // Build-only: a cross-compiled aarch64 binary can't execute on this
           // amd64 host without an emulator (no qemu-user/binfmt assumed here),
           // so `cargo test` is not run for this leg.
-          agent { docker { image RUST_IMAGE; reuseNode true } }
+          // `-u root` is required: this stage apt-get installs the aarch64
+          // cross-toolchain, and without it apt fails with
+          //   E: Could not open lock file /var/lib/apt/lists/lock (13: Permission denied)
+          // The build then continues and dies later at the confusing
+          // "failed to find tool aarch64-linux-gnu-gcc" -- the apt failure is
+          // non-fatal, so the real cause is 200 lines earlier. `reuseNode` is
+          // kept so this stage does not queue for a second executor.
+          agent { docker { image RUST_IMAGE; args '-u root'; reuseNode true } }
           steps {
             sh '''
               rustup target add aarch64-unknown-linux-gnu
