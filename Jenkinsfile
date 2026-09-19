@@ -88,6 +88,18 @@ pipeline {
               # succeeds with libc6-dev-arm64-cross added.
               apt-get update -qq && apt-get install -y -qq --no-install-recommends \
                 gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+              # Isolate this leg's build directory. The stages in this `parallel`
+              # block share ONE workspace (`reuseNode true`), and this leg runs as
+              # root so it can apt-get. Sharing `target/` means it writes
+              # root-owned files that a concurrently-running sibling stage then
+              # cannot touch:
+              #   error: failed to open: .../target/release/.cargo-lock
+              #   Permission denied (os error 13)
+              # A chown at the end of this stage does NOT fix that -- the sibling
+              # hits the file while this stage is still running. Separate target
+              # dirs remove the contention instead of racing it.
+              # (CI hardening 2026-09-18)
+              export CARGO_TARGET_DIR="$PWD/target-arm64"
               export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
               cargo build --release --target aarch64-unknown-linux-gnu
 
