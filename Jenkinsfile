@@ -90,6 +90,17 @@ pipeline {
                 gcc-aarch64-linux-gnu libc6-dev-arm64-cross
               export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
               cargo build --release --target aarch64-unknown-linux-gnu
+
+              # Hand the workspace back. This stage runs as root (it has to,
+              # to apt-get) and `reuseNode true` means it shares the SAME
+              # workspace as every other stage, which runs as the Jenkins
+              # uid. Without this, cargo artifacts written here stay
+              # root-owned and the next stage dies with
+              #   error: failed to open: .../target/release/.cargo-lock
+              #   Permission denied (os error 13)
+              # `--reference` copies the workspace root's own ownership
+              # rather than hardcoding a uid. (CI hardening 2026-09-18)
+              chown -R --reference="$PWD" "$PWD"
             '''
           }
         }
