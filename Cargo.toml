@@ -57,8 +57,9 @@ anyhow = "1.0"
 # ML framework (Candle primary, TFLite secondary).
 # Optional + feature-gated (see [features] below) so the default `cargo
 # build`/`cargo test` (what Jenkinsfile runs, no flags) never touches these —
-# only `--features candle` pulls them in. CPU-only on purpose: no cuda/metal/
-# accelerate features, so the build is uniform across macOS and Linux.
+# only `--features candle` pulls them in. CPU-only by default on purpose: no
+# cuda/metal/accelerate, so the default build is uniform across macOS and Linux.
+# GPU is the separate opt-in `cuda` feature below (needs a CUDA toolkit at build time).
 candle-core = { version = "0.9", optional = true }
 candle-nn = { version = "0.9", optional = true }
 candle-transformers = { version = "0.9", optional = true }
@@ -85,6 +86,12 @@ default = []
 # untouched, since it pulls a real ML toolchain + requires `make fetch-model`
 # to have downloaded weights for anything beyond `cargo build` to be useful.
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+
+# NVIDIA GPU inference through Candle's CUDA backend. Implies `candle`. Off by
+# default and NOT part of CI (Jenkinsfile): it needs nvcc + the CUDA runtime
+# libraries at build time and an NVIDIA driver at run time. The CPU backend is
+# unchanged without it. See README "GPU (CUDA) — POC".
+cuda = ["candle", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 # Remote proxy backend binding InferenceService to a third-party cloud API
 # (Claude/Anthropic Messages API first). This is explicitly a v0.2+/

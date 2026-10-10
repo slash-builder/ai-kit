@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- NVIDIA GPU (CUDA) support for the Candle backend, behind the opt-in `cuda` feature (off by default; not part of CI).
+  `DevicePreference` (`cpu` | `cuda[:N]` | `auto`), `CandleInferenceService::with_device`, `device_of`, `describe_cuda_devices`.
+  An explicit CUDA device that is missing, or a model larger than the GPU's free memory, is a hard error
+  (`ModelLoadFailed` / `InferenceOom` before the file is read) — never a silent CPU fallback.
+  `ai-kit-cli` gains `--device`, `devices` and `bench`; `scripts/cuda-userspace-toolkit.sh` builds a toolkit without root.
+  On an RTX 3060 with Llama-3.2-3B: ~89 tok/s decode and ~1,600 tok/s prompt processing versus 2.3 and 3 on the CPU.
 - `ClaudeProxyInferenceService` (`src/backends/claude_proxy.rs`), feature-gated
   behind `claude-proxy` (off by default): an `InferenceService` backend that
   proxies `infer()` to Anthropic's Messages API. **Experimental, v0.2+ scope
@@ -23,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `KvCacheManager` (per-session, privacy-isolated).
 - Comprehensive module docs with design rationale.
 - Unit tests for types, errors, registry, cache.
+
+### Changed
+- `CandleInferenceService` builds `ModelWeights` once in `load_model` and reuses it (one request at a time per model) instead of
+  rebuilding from raw bytes on every `infer()`; request isolation relies on Candle resetting its KV cache at position 0 and is covered by a test.
+  `load_model` on an already-loaded model is now a no-op.
 
 ### TODO
 - Candle integration (awaiting framework binding).

@@ -13,6 +13,7 @@ AI Kit provides a framework-agnostic inference API for Hearth devices. Models ar
 - ✅ Core trait definition (this repo)
 - ✅ Model registry (real YAML catalog loading)
 - ✅ Candle integration — **local dev POC** (see "Local Dev Inference (POC)" below); not the full MVP integration (no Storage Kit, Device Kit hints, or Score Kit wiring yet)
+- ✅ NVIDIA GPU (CUDA) support for the Candle backend — opt-in `cuda` feature, **POC** (see "GPU (CUDA) — POC" below)
 - ⏳ Message Kit transport (blocked on proto finalization)
 - ⏳ Storage Kit integration (blocked on storage-kit v2)
 
@@ -76,6 +77,56 @@ call runs a fresh generation — there's no cross-call transformer KV-cache
 reuse at the Candle level (`KvCacheManager` still tracks session bookkeeping/
 TTL, just not real tensor state); CPU-only, no CUDA/Metal; single small model,
 not the full model catalog / quantization-fallback story described below.
+
+## GPU (CUDA) — POC
+
+The Candle backend runs on an NVIDIA GPU behind the opt-in `cuda` feature. Nothing changes without it: the default build, CI and `--features candle` stay CPU-only.
+
+```bash
+# One-time, only if the machine has just the NVIDIA driver (no CUDA toolkit, no root):
+./scripts/cuda-userspace-toolkit.sh            # assembles nvcc + cuBLAS/cuRAND/NVRTC from pip wheels
+source ~/.local/cuda-13.2-pip/env.sh           # (skip both lines if `nvcc` is already on your PATH)
+
+cargo build --release --features cuda          # ~6 min first time (compiles Candle's CUDA kernels)
+./target/release/ai-kit-cli devices            # cpu, cuda:0 NVIDIA GeForce RTX 3060, 11.6/12.5 GB free
+./target/release/ai-kit-cli infer --model tinyllama --prompt "Say hello" --device cuda
+./target/release/ai-kit-cli bench --model tinyllama --prompt-file p.txt --device cuda --max-tokens 64
+```
+
+`--device` (or `AI_KIT_DEVICE`) takes `cpu` (default), `cuda`, `cuda:N` or `auto`. In code:
+`CandleInferenceService::with_device(catalog, DevicePreference::Cuda(0))`; `device_of(model_id)` says where a loaded model is running.
+
+**It fails hard, it does not fall back.** An explicit `cuda`/`cuda:N` that is missing, or not compiled in, makes
+`load_model` return an error that says what to fix. A model that does not fit in the GPU's *free* memory (file size + 15%,
+at least 384 MB, and never below the catalog's `vram_required_mb`) returns `InferenceOom` **before the file is read**; there is no spill
+to the CPU and no smaller quantisation (invariant "fail hard on OOM"). Only `auto` chooses (CUDA 0 if usable, else CPU), and the
+choice stays visible through `device_of`.
+
+**Measured** (RTX 3060 12 GB, Ryzen 5 2400G, Llama-3.2-3B Q4_K_M, greedy, model loaded once and warmed up; `ai-kit-cli bench`):
+
+| | CPU (`--device cpu`) | GPU (`--device cuda`) | llama.cpp on the same GPU (Ollama) |
+|---|---|---|---|
+| prompt processing, 244 tokens | 3 tok/s | **1,630 tok/s** | |
+| prompt processing, 1,531 tokens | ~3 tok/s | **1,345 tok/s** | ~3,800 tok/s |
+| decode, short context | 2.3 tok/s | **89 tok/s** | |
+| decode, 1,531-token context | | **43 tok/s** | ~113 tok/s |
+| model load (read + hash + parse + upload) | 6.5 s | 5 s | |
+
+So about 40x faster decoding and 500x faster prompt processing than the CPU, and roughly 35-40% of what llama.cpp reaches on the same card.
+The very first request on a machine also pays a one-time kernel JIT (~12 s here); the driver caches it on disk afterwards.
+
+**What changed in the backend to make this sensible.** The CPU POC rebuilt the whole model from raw bytes on every `infer()`;
+on a GPU that would re-upload the weights to VRAM per request. The weights are now built once at `load_model` and reused, one
+request at a time per model. Candle clears its KV cache whenever a forward pass starts at position 0, which every request does;
+`tests/candle_device.rs` runs request A, B, A on one loaded model and checks A is unchanged and B equals a fresh service's answer, on both CPU and GPU.
+`load_model` is also now idempotent (a second call is a no-op instead of a second copy in VRAM).
+
+**Still not done** (read before relying on it):
+- One GPU, one model at a time per device: there is no accounting of VRAM across several loaded models, so loading a second can fail with `InferenceOom`.
+- Requests for one model are serialised; there is no batching and no GPU test in CI (the Jenkins agents have no GPU), so the feature is lint-checked on a dev box only.
+- Still the POC's `quantized_llama` loader, so only plain-Llama GGUF models load (not Qwen3.5+, Gemma 4, Mistral 3). GPU support does not change that.
+- A finished request's key/value tensors stay in VRAM until the next request overwrites them. Needs a security review before this serves more than one principal (invariant: KV isolation per session).
+- The CPU POC's other limits remain: one chat template ("zephyr"), end-of-sequence looked up as `</s>`, fixed sampler seed.
 
 ## Cloud Proxy Inference — Claude/Anthropic (experimental, not yet ruled on)
 

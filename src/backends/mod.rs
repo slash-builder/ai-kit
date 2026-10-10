@@ -3,7 +3,9 @@
 //! - [`candle::CandleInferenceService`] (POC scope), feature-gated behind
 //!   `candle` so the default build/CI never touches it. See `README.md`'s
 //!   "Local Dev Inference (POC)" section and `AGENT.md`'s "Implemented (POC
-//!   scope)" entry for what this does and doesn't prove.
+//!   scope)" entry for what this does and doesn't prove. Runs on the CPU by
+//!   default; NVIDIA GPU is the opt-in `cuda` feature (see `README.md`'s
+//!   "GPU (CUDA) — POC").
 //! - [`claude_proxy::ClaudeProxyInferenceService`] (experimental, v0.2+
 //!   scope, feature-gated behind `claude-proxy`, off by default). See that
 //!   module's doc comment for the decision-memo #2/#9 open-ruling caveat
@@ -13,7 +15,7 @@
 pub mod candle;
 
 #[cfg(feature = "candle")]
-pub use candle::CandleInferenceService;
+pub use candle::{describe_cuda_devices, CandleInferenceService, DevicePreference};
 
 #[cfg(feature = "claude-proxy")]
 pub mod claude_proxy;
