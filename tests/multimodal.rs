@@ -58,7 +58,7 @@ fn junk_catalog(dir: &tempfile::TempDir, hash_ok: bool) -> String {
             .map(|(role, i)| format!("      - {{role: {role}, location: \"file://{}\", hash: \"{}\", size_bytes: 6}}\n", l(*i), h(*i)))
             .collect();
         format!(
-            "  - id: {id}\n    version: \"1.0.0\"\n    os_arch: [x86_64]\n    quantization_variants: [default]\n    default_quantization: default\n    hash: \"{}\"\n    size_bytes: 4\n    location: \"file://{}\"\n    files:\n{extras}    metadata:\n      parameters: 1\n      context_window: 77\n      vram_required_mb: 1\n      inference_latency_ms: 0\n      framework: candle\n      custom: {{request kind: {cap}, architecture: sd_turbo}}\n",
+            "  - id: {id}\n    version: \"1.0.0\"\n    os_arch: [x86_64]\n    quantization_variants: [default]\n    default_quantization: default\n    hash: \"{}\"\n    size_bytes: 4\n    location: \"file://{}\"\n    files:\n{extras}    metadata:\n      parameters: 1\n      context_window: 77\n      vram_required_mb: 1\n      inference_latency_ms: 0\n      framework: candle\n      custom: {{kind: {cap}, architecture: sd_turbo}}\n",
             h(main),
             l(main)
         )

@@ -13,9 +13,13 @@
 
 #[cfg(feature = "candle")]
 pub mod candle;
+#[cfg(feature = "candle")]
+pub mod common;
 
 #[cfg(feature = "candle")]
-pub use candle::{describe_cuda_devices, CandleInferenceService, DevicePreference};
+pub use candle::CandleInferenceService;
+#[cfg(feature = "candle")]
+pub use common::{describe_cuda_devices, DevicePreference};
 
 #[cfg(feature = "candle")]
 pub mod diffusion;

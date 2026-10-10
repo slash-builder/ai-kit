@@ -8,7 +8,7 @@
 //! device) is the right one and this backend has no cloud counterpart. The catalog entry has `model.safetensors` as the main file and
 //! `config` and `tokenizer` as extra files; every file is BLAKE3-verified on load.
 
-use crate::backends::candle::{check_vram, device_for, verify_model_files, DevicePreference};
+use crate::backends::common::{check_vram, device_for, verify_model_files, DevicePreference};
 use crate::error::{AiKitError, Result};
 use crate::modality::{
     unsupported, EmbeddingParams, EmbeddingResponse, Output, Request, RequestKind, RequestService,

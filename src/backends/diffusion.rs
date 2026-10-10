@@ -25,7 +25,7 @@
 //! steps from Candle's own RNG, which this backend seeds on CUDA (so a seed reproduces an image exactly there) but which cannot be seeded
 //! on the CPU. With `steps = 1` (no extra noise) the same seed gives the same image everywhere. No img2img, inpainting or LoRA. One request at a time per model.
 
-use crate::backends::candle::{check_vram, device_for, verify_model_files, DevicePreference};
+use crate::backends::common::{check_vram, device_for, verify_model_files, DevicePreference};
 use crate::error::{AiKitError, Result};
 use crate::modality::{
     unsupported, GeneratedImage, ImageGenParams, Output, Request, RequestKind, RequestService,
