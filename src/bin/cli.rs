@@ -540,7 +540,7 @@ fn verifier_from(spec: &str, tests: Option<&str>) -> ai_kit::Verifier {
 #[cfg(feature = "candle")]
 struct RouteJob {
     id: String,
-    kind: ai_kit::Capability,
+    kind: ai_kit::RequestKind,
     prompt: String,
     class: Option<ai_kit::TaskClass>,
     privacy: ai_kit::Privacy,
@@ -564,7 +564,7 @@ fn check_for(job: &RouteJob) -> ai_kit::OutputCheck {
     // image request must be checked as an image.
     if job.verify == "sane" {
         OutputCheck::Sane
-    } else if job.kind == ai_kit::Capability::TextGeneration {
+    } else if job.kind == ai_kit::RequestKind::TextGeneration {
         match verifier_from(&job.verify, job.tests.as_deref()) {
             ai_kit::Verifier::None => OutputCheck::None,
             v => OutputCheck::Custom(std::sync::Arc::new(move |o: &Output| match o {
@@ -607,7 +607,7 @@ fn job_request(job: &RouteJob) -> Result<ai_kit::Request, String> {
         std::fs::read(f).map_err(|e| format!("cannot read {f}: {e}"))
     };
     Ok(match job.kind {
-        ai_kit::Capability::ImageGeneration => {
+        ai_kit::RequestKind::ImageGeneration => {
             let mut p = ImageGenParams::new(String::new(), job.prompt.clone());
             p.width = job.width;
             p.height = job.height;
@@ -615,14 +615,14 @@ fn job_request(job: &RouteJob) -> Result<ai_kit::Request, String> {
             p.seed = job.seed;
             Request::ImageGeneration(p)
         }
-        ai_kit::Capability::Embedding => Request::Embedding(EmbeddingParams {
+        ai_kit::RequestKind::Embedding => Request::Embedding(EmbeddingParams {
             model_id: String::new(),
             inputs: job.inputs.clone(),
             normalize: true,
             session_id: None,
             request_id: None,
         }),
-        ai_kit::Capability::ImageUnderstanding => {
+        ai_kit::RequestKind::ImageUnderstanding => {
             let mime = match job.file.as_deref().and_then(|f| f.rsplit('.').next()) {
                 Some("jpg" | "jpeg") => "image/jpeg",
                 Some("webp") => "image/webp",
@@ -638,7 +638,7 @@ fn job_request(job: &RouteJob) -> Result<ai_kit::Request, String> {
                 request_id: None,
             })
         }
-        ai_kit::Capability::SpeechToText => Request::SpeechToText(SpeechParams {
+        ai_kit::RequestKind::SpeechToText => Request::SpeechToText(SpeechParams {
             model_id: String::new(),
             audio: bytes()?,
             format: AudioFormat::Wav,
@@ -646,7 +646,7 @@ fn job_request(job: &RouteJob) -> Result<ai_kit::Request, String> {
             session_id: None,
             request_id: None,
         }),
-        ai_kit::Capability::TextGeneration => Request::Text(InferenceParams {
+        ai_kit::RequestKind::TextGeneration => Request::Text(InferenceParams {
             model_id: String::new(),
             prompt: job.prompt.clone(),
             temperature: 0.0,
@@ -656,6 +656,13 @@ fn job_request(job: &RouteJob) -> Result<ai_kit::Request, String> {
             preferred_quantization: None,
             request_id: None,
         }),
+        // RequestKind is non_exhaustive: a kind added to the library later must be an explicit error here, never a text request.
+        other => {
+            return Err(format!(
+                "this CLI cannot build a '{}' request",
+                other.as_str()
+            ))
+        }
     })
 }
 
@@ -663,9 +670,9 @@ fn job_request(job: &RouteJob) -> Result<ai_kit::Request, String> {
 async fn cmd_route_async(args: &[String]) -> ExitCode {
     use ai_kit::routed::TierBackend;
     use ai_kit::{
-        CandleEmbeddingService, CandleImageService, CandleInferenceService, Capability,
-        InferenceService, MultiHybridService, Output, RoutePolicy, RoutedRequest, TaskClass,
-        TextCapability,
+        CandleEmbeddingService, CandleImageService, CandleInferenceService, InferenceService,
+        MultiHybridService, Output, RequestKind, RoutePolicy, RoutedRequest, TaskClass,
+        TextService,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -694,7 +701,7 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
     let mut reqs: Vec<RouteJob> = Vec::new();
     let from_json = |i: usize, v: &Value| -> Result<RouteJob, String> {
         let s = |k: &str, d: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or(d).to_string();
-        let kind: Capability = s("kind", "text_generation").parse()?;
+        let kind: RequestKind = s("kind", "text_generation").parse()?;
         let n = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
         Ok(RouteJob {
             id: s("id", &(i + 1).to_string()),
@@ -780,8 +787,8 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
                     }
                 }
                 local.push(TierBackend::new(
-                    Arc::new(TextCapability::new(Arc::new(svc))),
-                    &[(Capability::TextGeneration, &m)],
+                    Arc::new(TextService::new(Arc::new(svc))),
+                    &[(RequestKind::TextGeneration, &m)],
                 ));
             }
             Err(e) => {
@@ -794,7 +801,7 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
         match CandleImageService::new(&catalog_path, device) {
             Ok(svc) => local.push(TierBackend::new(
                 Arc::new(svc),
-                &[(Capability::ImageGeneration, &m)],
+                &[(RequestKind::ImageGeneration, &m)],
             )),
             Err(e) => {
                 eprintln!("error: image catalog: {e}");
@@ -806,7 +813,7 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
         match CandleEmbeddingService::new(&catalog_path, device) {
             Ok(svc) => local.push(TierBackend::new(
                 Arc::new(svc),
-                &[(Capability::Embedding, &m)],
+                &[(RequestKind::Embedding, &m)],
             )),
             Err(e) => {
                 eprintln!("error: embedding catalog: {e}");
@@ -818,8 +825,8 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
         .map(|c| {
             let name = flag_value(args, "--cloud-model").unwrap_or_else(|| "cloud".into());
             vec![TierBackend::new(
-                Arc::new(TextCapability::new(Arc::new(CommandCloud { cmd: c }))),
-                &[(Capability::TextGeneration, &name)],
+                Arc::new(TextService::new(Arc::new(CommandCloud { cmd: c }))),
+                &[(RequestKind::TextGeneration, &name)],
             )]
         })
         .unwrap_or_default();
@@ -866,6 +873,7 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
                         "head": e.vectors.first().map(|v| v.iter().take(4).collect::<Vec<_>>()), "inference_ms": e.inference_ms})
                     }
                     Output::Transcript(t) => json!({"kind": "transcript", "text": t.text}),
+                    _ => json!({"kind": "unknown", "note": "output kind newer than this CLI"}),
                 };
                 println!(
                     "{}",
@@ -897,7 +905,7 @@ fn cmd_embed(_args: &[String]) -> ExitCode {
 
 #[cfg(feature = "candle")]
 fn cmd_imagine(args: &[String]) -> ExitCode {
-    use ai_kit::{CandleImageService, CapabilityService, ImageGenParams, Output, Request};
+    use ai_kit::{CandleImageService, ImageGenParams, Output, Request, RequestService};
     let (Some(model), Some(prompt), Some(out)) = (
         flag_value(args, "--model"),
         flag_value(args, "--prompt"),
@@ -952,7 +960,7 @@ fn cmd_imagine(args: &[String]) -> ExitCode {
 
 #[cfg(feature = "candle")]
 fn cmd_embed(args: &[String]) -> ExitCode {
-    use ai_kit::{CandleEmbeddingService, CapabilityService, EmbeddingParams, Output, Request};
+    use ai_kit::{CandleEmbeddingService, EmbeddingParams, Output, Request, RequestService};
     let Some(model) = flag_value(args, "--model") else {
         eprintln!("error: embed needs --model and one or more --text");
         return ExitCode::from(2);

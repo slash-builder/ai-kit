@@ -1,6 +1,6 @@
 //! Text embeddings on Candle (a BERT-family sentence encoder such as all-MiniLM-L6-v2). **POC.**
 //!
-//! [`CandleEmbeddingService`] implements [`CapabilityService`] for [`Capability::Embedding`]: the
+//! [`CandleEmbeddingService`] implements [`RequestService`] for [`RequestKind::Embedding`]: the
 //! "semantic search over Courier files" use the Inference Kit design names. It mean-pools the last hidden state under the
 //! attention mask and, if asked, scales each vector to unit length (so a dot product is cosine similarity).
 //!
@@ -11,7 +11,7 @@
 use crate::backends::candle::{check_vram, device_for, verify_model_files, DevicePreference};
 use crate::error::{AiKitError, Result};
 use crate::modality::{
-    unsupported, Capability, CapabilityService, EmbeddingParams, EmbeddingResponse, Output, Request,
+    unsupported, EmbeddingParams, EmbeddingResponse, Output, Request, RequestKind, RequestService,
 };
 use crate::registry::ModelRegistry;
 use crate::types::ModelMetadata;
@@ -53,12 +53,12 @@ impl CandleEmbeddingService {
             .ok_or_else(|| AiKitError::ModelNotFound {
                 model_id: id.to_string(),
             })?;
-        if m.capability() != Capability::Embedding {
+        if m.kind() != RequestKind::Embedding {
             return Err(AiKitError::ModelLoadFailed {
                 model_id: id.to_string(),
                 reason: format!(
                     "'{id}' is a {} model, not an embedding model",
-                    m.capability().as_str()
+                    m.kind().as_str()
                 ),
             });
         }
@@ -185,18 +185,15 @@ impl CandleEmbeddingService {
 }
 
 #[async_trait]
-impl CapabilityService for CandleEmbeddingService {
-    fn capabilities(&self) -> Vec<Capability> {
-        vec![Capability::Embedding]
+impl RequestService for CandleEmbeddingService {
+    fn kinds(&self) -> Vec<RequestKind> {
+        vec![RequestKind::Embedding]
     }
 
     async fn handle(&self, req: Request) -> Result<Output> {
         match req {
             Request::Embedding(p) => self.embed(&p).map(Output::Embeddings),
-            other => Err(unsupported(
-                other.capability(),
-                "this is an embedding backend",
-            )),
+            other => Err(unsupported(other.kind(), "this is an embedding backend")),
         }
     }
 }

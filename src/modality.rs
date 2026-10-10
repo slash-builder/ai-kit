@@ -3,13 +3,13 @@
 //! [`InferenceService`] is deliberately text-in/text-out and its ABI is frozen, so it is left
 //! alone. This module adds a **second, general contract** next to it:
 //!
-//! - [`Capability`]: what kind of work (text, image generation, image understanding,
+//! - [`RequestKind`]: what kind of work (text, image generation, image understanding,
 //!   embeddings, speech-to-text).
 //! - [`Request`] / [`Output`]: typed payloads for each, so a caller never smuggles an image
 //!   through a text prompt, and an answer never needs guessing at.
-//! - [`CapabilityService`]: "I can do these capabilities; give me a request". A backend
-//!   implements it for whichever capabilities it really has.
-//! - [`TextCapability`]: lifts any existing [`InferenceService`] into the new contract, so the
+//! - [`RequestService`]: "I can do these request kinds; give me a request". A backend
+//!   implements it for whichever request kinds it really has.
+//! - [`TextService`]: lifts any existing [`InferenceService`] into the new contract, so the
 //!   text backends need no changes.
 //!
 //! # "Ready for any kind of request" means three things
@@ -17,14 +17,14 @@
 //! 1. Every kind of request is *representable* and validated here, whether or not a backend
 //!    exists on this device.
 //! 2. A request nobody can serve gets a **typed, honest answer**
-//!    ([`AiKitError::UnsupportedCapability`], or a routing [`crate::Plan::Unavailable`]) that
-//!    says which capability was missing and why. It is never a silent fallback to the wrong kind
+//!    ([`AiKitError::UnsupportedKind`], or a routing [`crate::Plan::Unavailable`]) that
+//!    says which request kind was missing and why. It is never a silent fallback to the wrong kind
 //!    of model and never a confusing `InvalidParams`.
 //! 3. The router and the hybrid service ([`crate::routed`]) pick a tier from *which tiers have the
-//!    capability*, not from the assumption that everything is text.
+//!    request kind*, not from the assumption that everything is text.
 //!
 //! What has real backends today, and what is only a contract, is listed in the README. The
-//! contract is complete for all five capabilities; the backends are not.
+//! contract is complete for all five request kinds; the backends are not.
 
 use crate::error::{AiKitError, Result};
 use crate::service::InferenceService;
@@ -37,7 +37,8 @@ use std::sync::Arc;
 /// A kind of work. New kinds are added here first, so every consumer sees them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Capability {
+#[non_exhaustive]
+pub enum RequestKind {
     /// Text in, text out (the original `InferenceService`).
     TextGeneration,
     /// Text prompt in, a raster image out.
@@ -50,36 +51,36 @@ pub enum Capability {
     SpeechToText,
 }
 
-impl Capability {
-    pub const ALL: [Capability; 5] = [
-        Capability::TextGeneration,
-        Capability::ImageGeneration,
-        Capability::ImageUnderstanding,
-        Capability::Embedding,
-        Capability::SpeechToText,
+impl RequestKind {
+    pub const ALL: [RequestKind; 5] = [
+        RequestKind::TextGeneration,
+        RequestKind::ImageGeneration,
+        RequestKind::ImageUnderstanding,
+        RequestKind::Embedding,
+        RequestKind::SpeechToText,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Capability::TextGeneration => "text_generation",
-            Capability::ImageGeneration => "image_generation",
-            Capability::ImageUnderstanding => "image_understanding",
-            Capability::Embedding => "embedding",
-            Capability::SpeechToText => "speech_to_text",
+            RequestKind::TextGeneration => "text_generation",
+            RequestKind::ImageGeneration => "image_generation",
+            RequestKind::ImageUnderstanding => "image_understanding",
+            RequestKind::Embedding => "embedding",
+            RequestKind::SpeechToText => "speech_to_text",
         }
     }
 }
 
-impl FromStr for Capability {
+impl FromStr for RequestKind {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, String> {
-        Capability::ALL
+        RequestKind::ALL
             .into_iter()
             .find(|c| c.as_str() == s.trim().to_ascii_lowercase())
             .ok_or_else(|| {
                 format!(
-                    "unknown capability '{s}' (expected one of: {})",
-                    Capability::ALL.map(|c| c.as_str()).join(", ")
+                    "unknown request kind '{s}' (expected one of: {})",
+                    RequestKind::ALL.map(|c| c.as_str()).join(", ")
                 )
             })
     }
@@ -238,6 +239,7 @@ pub struct TranscriptResponse {
 
 /// Any request the kit can be asked.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Request {
     Text(InferenceParams),
     ImageGeneration(ImageGenParams),
@@ -247,13 +249,13 @@ pub enum Request {
 }
 
 impl Request {
-    pub fn capability(&self) -> Capability {
+    pub fn kind(&self) -> RequestKind {
         match self {
-            Request::Text(_) => Capability::TextGeneration,
-            Request::ImageGeneration(_) => Capability::ImageGeneration,
-            Request::ImageUnderstanding(_) => Capability::ImageUnderstanding,
-            Request::Embedding(_) => Capability::Embedding,
-            Request::SpeechToText(_) => Capability::SpeechToText,
+            Request::Text(_) => RequestKind::TextGeneration,
+            Request::ImageGeneration(_) => RequestKind::ImageGeneration,
+            Request::ImageUnderstanding(_) => RequestKind::ImageUnderstanding,
+            Request::Embedding(_) => RequestKind::Embedding,
+            Request::SpeechToText(_) => RequestKind::SpeechToText,
         }
     }
 
@@ -348,6 +350,7 @@ impl Request {
 
 /// Any answer the kit can give.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Output {
     /// Text generation, and the answer to an image question.
     Text(InferenceResponse),
@@ -437,45 +440,45 @@ pub fn png_dims(b: &[u8]) -> Option<(u32, u32)> {
     ))
 }
 
-/// A backend that can do one or more [`Capability`]s.
+/// A backend that can do one or more [`RequestKind`]s.
 ///
-/// Implement `handle` for the capabilities you really have and return
-/// [`AiKitError::UnsupportedCapability`] (see [`unsupported`]) for the rest.
+/// Implement `handle` for the request kinds you really have and return
+/// [`AiKitError::UnsupportedKind`] (see [`unsupported`]) for the rest.
 #[async_trait]
-pub trait CapabilityService: Send + Sync {
-    fn capabilities(&self) -> Vec<Capability>;
+pub trait RequestService: Send + Sync {
+    fn kinds(&self) -> Vec<RequestKind>;
     async fn handle(&self, req: Request) -> Result<Output>;
 }
 
 /// The error for "this service does not do that".
-pub fn unsupported(cap: Capability, reason: impl Into<String>) -> AiKitError {
-    AiKitError::UnsupportedCapability {
-        capability: cap.as_str().to_string(),
+pub fn unsupported(cap: RequestKind, reason: impl Into<String>) -> AiKitError {
+    AiKitError::UnsupportedKind {
+        request_kind: cap.as_str().to_string(),
         reason: reason.into(),
     }
 }
 
 /// Lifts any text [`InferenceService`] into the general contract.
-pub struct TextCapability {
+pub struct TextService {
     inner: Arc<dyn InferenceService>,
 }
 
-impl TextCapability {
+impl TextService {
     pub fn new(inner: Arc<dyn InferenceService>) -> Self {
         Self { inner }
     }
 }
 
 #[async_trait]
-impl CapabilityService for TextCapability {
-    fn capabilities(&self) -> Vec<Capability> {
-        vec![Capability::TextGeneration]
+impl RequestService for TextService {
+    fn kinds(&self) -> Vec<RequestKind> {
+        vec![RequestKind::TextGeneration]
     }
     async fn handle(&self, req: Request) -> Result<Output> {
         match req {
             Request::Text(p) => self.inner.infer(p).await.map(Output::Text),
             other => Err(unsupported(
-                other.capability(),
+                other.kind(),
                 "this is a text-generation backend",
             )),
         }
@@ -487,11 +490,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capabilities_round_trip_through_strings() {
-        for c in Capability::ALL {
-            assert_eq!(c.as_str().parse::<Capability>(), Ok(c));
+    fn request_kinds_round_trip_through_strings() {
+        for c in RequestKind::ALL {
+            assert_eq!(c.as_str().parse::<RequestKind>(), Ok(c));
         }
-        assert!("telepathy".parse::<Capability>().is_err());
+        assert!("telepathy".parse::<RequestKind>().is_err());
     }
 
     #[test]
@@ -516,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn every_request_kind_reports_its_capability_and_validates() {
+    fn every_request_kind_reports_its_kind_and_validates() {
         let reqs = [
             Request::Text(InferenceParams {
                 model_id: "m".into(),
@@ -554,10 +557,10 @@ mod tests {
                 request_id: None,
             }),
         ];
-        let caps: Vec<Capability> = reqs.iter().map(Request::capability).collect();
-        assert_eq!(caps, Capability::ALL.to_vec());
+        let caps: Vec<RequestKind> = reqs.iter().map(Request::kind).collect();
+        assert_eq!(caps, RequestKind::ALL.to_vec());
         for r in &reqs {
-            assert!(r.validate().is_ok(), "{:?}", r.capability());
+            assert!(r.validate().is_ok(), "{:?}", r.kind());
             assert!(r.payload_bytes() > 0);
         }
     }

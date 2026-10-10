@@ -1,20 +1,20 @@
 //! Hybrid routing for **any kind of request**: [`MultiHybridService`].
 //!
 //! [`crate::HybridInferenceService`] is the text-only façade (two [`InferenceService`]s). This is the general
-//! one: each tier is a list of [`CapabilityService`] backends, a request can be text, image generation, image
-//! understanding, embeddings or speech, and the [`Router`] picks a tier from *which tiers have the capability*
+//! one: each tier is a list of [`RequestService`] backends, a request can be text, image generation, image
+//! understanding, embeddings or speech, and the [`Router`] picks a tier from *which tiers have the request kind*
 //! before it looks at privacy, fit, policy and verification (the same rules as the text path, in the same order).
 //!
 //! What this adds on top of the text path:
 //!
-//! - **Capability negotiation.** A request no tier can serve is [`AiKitError::UnsupportedCapability`] with the
+//! - **RequestKind negotiation.** A request no tier can serve is [`AiKitError::UnsupportedKind`] with the
 //!   reason, never a wrong-kind-of-model answer. A request only the *cloud* can serve, with private content, is
 //!   also unavailable: the router will not leak private data to get an answer.
 //! - **Re-typing.** Free-form text such as "paint a cottage at dawn" is classified, and if it is really an image
-//!   request and an image backend exists, it runs as one. The caller does not have to know which capability it needs.
+//!   request and an image backend exists, it runs as one. The caller does not have to know which request kind it needs.
 //! - **Verification for every modality** ([`OutputCheck`]): a real PNG of the right size that is not flat, embeddings
 //!   that are finite and the right shape, a non-empty transcript. A failed check can escalate to a cloud tier that
-//!   has the capability, exactly as for text.
+//!   has the request kind, exactly as for text.
 //! - **Egress accounting.** [`RouteStats::cloud_payload_bytes`] counts what was sent off the device, whatever its type.
 
 use crate::error::{AiKitError, Result};
@@ -23,20 +23,20 @@ use crate::hybrid::{
     RouteTrace, Router, TaskClass, Tier,
 };
 use crate::modality::{
-    unsupported, Capability, CapabilityService, ImageGenParams, Output, OutputCheck, Request,
+    unsupported, ImageGenParams, Output, OutputCheck, Request, RequestKind, RequestService,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-/// One backend in a tier, with the model it uses for each capability.
+/// One backend in a tier, with the model it uses for each request kind.
 #[derive(Clone)]
 pub struct TierBackend {
-    pub service: Arc<dyn CapabilityService>,
-    pub model_ids: HashMap<Capability, String>,
+    pub service: Arc<dyn RequestService>,
+    pub model_ids: HashMap<RequestKind, String>,
 }
 
 impl TierBackend {
-    pub fn new(service: Arc<dyn CapabilityService>, models: &[(Capability, &str)]) -> Self {
+    pub fn new(service: Arc<dyn RequestService>, models: &[(RequestKind, &str)]) -> Self {
         Self {
             service,
             model_ids: models.iter().map(|(c, m)| (*c, m.to_string())).collect(),
@@ -50,20 +50,20 @@ struct TierSet {
 }
 
 impl TierSet {
-    fn find(&self, cap: Capability) -> Option<&TierBackend> {
+    fn find(&self, cap: RequestKind) -> Option<&TierBackend> {
         self.backends
             .iter()
-            .find(|b| b.service.capabilities().contains(&cap) && b.model_ids.contains_key(&cap))
+            .find(|b| b.service.kinds().contains(&cap) && b.model_ids.contains_key(&cap))
     }
-    fn has(&self, cap: Capability) -> bool {
+    fn has(&self, cap: RequestKind) -> bool {
         self.find(cap).is_some()
     }
-    fn capabilities(&self) -> HashSet<Capability> {
+    fn kinds(&self) -> HashSet<RequestKind> {
         self.backends
             .iter()
             .flat_map(|b| {
                 b.service
-                    .capabilities()
+                    .kinds()
                     .into_iter()
                     .filter(|c| b.model_ids.contains_key(c))
             })
@@ -131,10 +131,10 @@ impl MultiHybridService {
     }
 
     /// What each tier can do, for display and for callers that want to know before asking.
-    pub fn capabilities(&self) -> (Vec<Capability>, Vec<Capability>) {
+    pub fn kinds(&self) -> (Vec<RequestKind>, Vec<RequestKind>) {
         let f = |t: &TierSet| {
-            let s = t.capabilities();
-            Capability::ALL
+            let s = t.kinds();
+            RequestKind::ALL
                 .into_iter()
                 .filter(|c| s.contains(c))
                 .collect()
@@ -165,7 +165,7 @@ impl MultiHybridService {
     /// Decide only; run nothing.
     pub fn explain(&self, r: &RoutedRequest) -> Decision {
         let (req, class) = self.effective(r);
-        let cap = req.capability();
+        let cap = req.kind();
         self.router.decide_multi(
             cap,
             class,
@@ -183,7 +183,7 @@ impl MultiHybridService {
         req: &Request,
         check: &OutputCheck,
     ) -> (Attempt, Option<Output>) {
-        let cap = req.capability();
+        let cap = req.kind();
         let set = if tier == Tier::Local {
             &self.local
         } else {
@@ -279,20 +279,32 @@ impl MultiHybridService {
             final_tier: None,
             notes: Vec::new(),
         };
-        let cap = req.capability();
-        if req.capability() != r.request.capability() {
+        let cap = req.kind();
+        if req.kind() != r.request.kind() {
             trace.notes.push(format!(
                 "treated a {} request as {}",
-                r.request.capability().as_str(),
+                r.request.kind().as_str(),
                 cap.as_str()
             ));
         }
         let (first, escalate) = match decision.plan {
             Plan::Run { first, escalate } => (first, escalate),
-            Plan::Delegate { ref capability } => {
-                return Err(unsupported(cap, format!("delegate to '{capability}'")))
+            Plan::Delegate { ref request_kind } => {
+                return Err(unsupported(cap, format!("delegate to '{request_kind}'")))
             }
-            Plan::Unavailable { ref reason, .. } => return Err(unsupported(cap, reason.clone())),
+            Plan::Unavailable {
+                ref reason,
+                needs_shareable,
+                ..
+            } => {
+                return Err(if needs_shareable {
+                    AiKitError::RequiresShareable {
+                        request_kind: cap.as_str().to_string(),
+                    }
+                } else {
+                    unsupported(cap, reason.clone())
+                })
+            }
         };
         let private = r.privacy == Privacy::Private;
         let cloud_ok = self.cloud.has(cap) && !private;
@@ -392,14 +404,14 @@ mod tests {
 
     /// A scripted backend: serves `caps`, counts calls, and produces outputs from `flat_images` etc.
     struct Mock {
-        caps: Vec<Capability>,
+        caps: Vec<RequestKind>,
         calls: AtomicU32,
         text: String,
         flat_image: bool,
         fail: bool,
     }
     impl Mock {
-        fn new(caps: &[Capability]) -> Arc<Self> {
+        fn new(caps: &[RequestKind]) -> Arc<Self> {
             Arc::new(Self {
                 caps: caps.to_vec(),
                 calls: AtomicU32::new(0),
@@ -408,7 +420,7 @@ mod tests {
                 fail: false,
             })
         }
-        fn flat(caps: &[Capability]) -> Arc<Self> {
+        fn flat(caps: &[RequestKind]) -> Arc<Self> {
             Arc::new(Self {
                 caps: caps.to_vec(),
                 calls: AtomicU32::new(0),
@@ -417,7 +429,7 @@ mod tests {
                 fail: false,
             })
         }
-        fn failing(caps: &[Capability]) -> Arc<Self> {
+        fn failing(caps: &[RequestKind]) -> Arc<Self> {
             Arc::new(Self {
                 caps: caps.to_vec(),
                 calls: AtomicU32::new(0),
@@ -439,8 +451,8 @@ mod tests {
         b
     }
     #[async_trait]
-    impl CapabilityService for Mock {
-        fn capabilities(&self) -> Vec<Capability> {
+    impl RequestService for Mock {
+        fn kinds(&self) -> Vec<RequestKind> {
             self.caps.clone()
         }
         async fn handle(&self, req: Request) -> Result<Output> {
@@ -484,7 +496,7 @@ mod tests {
                     session_id: sid,
                     request_id: "r".into(),
                 }),
-                other => return Err(unsupported(other.capability(), "mock")),
+                other => return Err(unsupported(other.kind(), "mock")),
             })
         }
     }
@@ -513,13 +525,13 @@ mod tests {
             request_id: None,
         })
     }
-    fn tier(m: &Arc<Mock>, caps: &[Capability]) -> TierBackend {
+    fn tier(m: &Arc<Mock>, caps: &[RequestKind]) -> TierBackend {
         TierBackend::new(
             m.clone(),
             &caps.iter().map(|c| (*c, "model")).collect::<Vec<_>>(),
         )
     }
-    use Capability::*;
+    use RequestKind::*;
 
     #[tokio::test]
     async fn every_kind_of_request_is_served_by_the_tier_that_has_it() {
@@ -530,7 +542,7 @@ mod tests {
             RoutePolicy::local_first(),
         );
         for r in [text_req("hello"), img_req("a cat"), embed_req()] {
-            let want = r.capability();
+            let want = r.kind();
             let (out, trace) = s.handle_routed(RoutedRequest::new(r)).await.unwrap();
             assert_eq!(trace.final_tier, Some(Tier::Local));
             let got = match out {
@@ -545,7 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_capability_nobody_has_is_unsupported_not_attempted() {
+    async fn a_request_kind_nobody_has_is_unsupported_not_attempted() {
         let local = Mock::new(&[TextGeneration]);
         let cloud = Mock::new(&[TextGeneration]);
         let s = MultiHybridService::new(
@@ -558,16 +570,13 @@ mod tests {
                 .handle_routed(RoutedRequest::new(r).shareable())
                 .await
                 .unwrap_err();
-            assert!(
-                matches!(e, AiKitError::UnsupportedCapability { .. }),
-                "{e:?}"
-            );
+            assert!(matches!(e, AiKitError::UnsupportedKind { .. }), "{e:?}");
         }
         assert_eq!((local.calls(), cloud.calls()), (0, 0));
     }
 
     #[tokio::test]
-    async fn cloud_only_capability_with_private_content_is_unavailable_not_leaked() {
+    async fn cloud_only_request_kind_with_private_content_is_unavailable_not_leaked() {
         let local = Mock::new(&[TextGeneration]);
         let cloud = Mock::new(&[TextGeneration, ImageUnderstanding]);
         let s = MultiHybridService::new(
@@ -588,7 +597,11 @@ mod tests {
             .handle_routed(RoutedRequest::new(r.clone()))
             .await
             .unwrap_err();
-        assert!(matches!(e, AiKitError::UnsupportedCapability { .. }));
+        assert!(matches!(e, AiKitError::RequiresShareable { .. }), "{e:?}");
+        assert_eq!(
+            e.to_inference_error_code(),
+            crate::error::InferenceErrorCode::RequiresShareable
+        );
         assert_eq!(cloud.calls(), 0, "private image reached the cloud");
         // Shareable: the cloud tier is allowed to take it. (The mock has no vision, so it answers Unsupported itself.)
         let _ = s.handle_routed(RoutedRequest::new(r).shareable()).await;
@@ -716,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_report_what_each_tier_really_has() {
+    fn kinds_report_what_each_tier_really_has() {
         let local = Mock::new(&[TextGeneration, Embedding]);
         let cloud = Mock::new(&[TextGeneration]);
         let s = MultiHybridService::new(
@@ -725,7 +738,7 @@ mod tests {
             RoutePolicy::local_first(),
         );
         assert_eq!(
-            s.capabilities(),
+            s.kinds(),
             (vec![TextGeneration, Embedding], vec![TextGeneration])
         );
     }

@@ -7,7 +7,7 @@
 //! - Async-first (supports both in-process and Message Kit binding).
 //! - Frozen ABI (conforms to Spec Kit, versioned with semantic versioning).
 //!
-//! # Capability Gating (Decision Memo #1)
+//! # RequestKind Gating (Decision Memo #1)
 //!
 //! Per decision memo #1, AI Kit trusts Hearth's capability check at call boundary.
 //! When an app calls `infer()`, the Hearth runtime has already verified the capability grant.

@@ -14,9 +14,10 @@
 
 use ai_kit::routed::TierBackend;
 use ai_kit::{
-    AiKitError, CandleEmbeddingService, CandleImageService, CandleInferenceService, Capability,
-    CapabilityService, DevicePreference, EmbeddingParams, ImageGenParams, InferenceParams,
-    InferenceService, MultiHybridService, Output, OutputCheck, Request, RoutePolicy, RoutedRequest,
+    AiKitError, CandleEmbeddingService, CandleImageService, CandleInferenceService,
+    DevicePreference, EmbeddingParams, ImageGenParams, InferenceParams, InferenceService,
+    MultiHybridService, Output, OutputCheck, Request, RequestKind, RequestService, RoutePolicy,
+    RoutedRequest,
 };
 use std::io::Write;
 use std::sync::Arc;
@@ -57,7 +58,7 @@ fn junk_catalog(dir: &tempfile::TempDir, hash_ok: bool) -> String {
             .map(|(role, i)| format!("      - {{role: {role}, location: \"file://{}\", hash: \"{}\", size_bytes: 6}}\n", l(*i), h(*i)))
             .collect();
         format!(
-            "  - id: {id}\n    version: \"1.0.0\"\n    os_arch: [x86_64]\n    quantization_variants: [default]\n    default_quantization: default\n    hash: \"{}\"\n    size_bytes: 4\n    location: \"file://{}\"\n    files:\n{extras}    metadata:\n      parameters: 1\n      context_window: 77\n      vram_required_mb: 1\n      inference_latency_ms: 0\n      framework: candle\n      custom: {{capability: {cap}, architecture: sd_turbo}}\n",
+            "  - id: {id}\n    version: \"1.0.0\"\n    os_arch: [x86_64]\n    quantization_variants: [default]\n    default_quantization: default\n    hash: \"{}\"\n    size_bytes: 4\n    location: \"file://{}\"\n    files:\n{extras}    metadata:\n      parameters: 1\n      context_window: 77\n      vram_required_mb: 1\n      inference_latency_ms: 0\n      framework: candle\n      custom: {{request kind: {cap}, architecture: sd_turbo}}\n",
             h(main),
             l(main)
         )
@@ -142,8 +143,8 @@ async fn each_backend_says_so_when_asked_for_something_it_does_not_do() {
     let cat = junk_catalog(&dir, true);
     let img = CandleImageService::new(&cat, DevicePreference::Cpu).unwrap();
     let emb = CandleEmbeddingService::new(&cat, DevicePreference::Cpu).unwrap();
-    assert_eq!(img.capabilities(), vec![Capability::ImageGeneration]);
-    assert_eq!(emb.capabilities(), vec![Capability::Embedding]);
+    assert_eq!(img.kinds(), vec![RequestKind::ImageGeneration]);
+    assert_eq!(emb.kinds(), vec![RequestKind::Embedding]);
     let text = Request::Text(InferenceParams {
         model_id: "txt".into(),
         prompt: "hi".into(),
@@ -156,13 +157,13 @@ async fn each_backend_says_so_when_asked_for_something_it_does_not_do() {
     });
     for r in [img.handle(text.clone()).await, emb.handle(text).await] {
         assert!(
-            matches!(r, Err(AiKitError::UnsupportedCapability { .. })),
+            matches!(r, Err(AiKitError::UnsupportedKind { .. })),
             "{r:?}"
         );
     }
     assert!(matches!(
         emb.handle(image_req("img", 512)).await,
-        Err(AiKitError::UnsupportedCapability { .. })
+        Err(AiKitError::UnsupportedKind { .. })
     ));
 }
 
@@ -290,11 +291,11 @@ async fn one_service_routes_every_kind_of_request_and_is_honest_about_the_rest()
     let local = vec![
         TierBackend::new(
             Arc::new(CandleImageService::new(&cat, device()).unwrap()),
-            &[(Capability::ImageGeneration, "sd-turbo")],
+            &[(RequestKind::ImageGeneration, "sd-turbo")],
         ),
         TierBackend::new(
             Arc::new(CandleEmbeddingService::new(&cat, device()).unwrap()),
-            &[(Capability::Embedding, "minilm")],
+            &[(RequestKind::Embedding, "minilm")],
         ),
     ];
     let svc = MultiHybridService::new(local, vec![], RoutePolicy::local_first());
@@ -338,7 +339,7 @@ async fn one_service_routes_every_kind_of_request_and_is_honest_about_the_rest()
         .await
         .unwrap_err();
     assert!(
-        matches!(e, AiKitError::UnsupportedCapability { .. }),
+        matches!(e, AiKitError::UnsupportedKind { .. }),
         "no text backend is configured: {e:?}"
     );
 }

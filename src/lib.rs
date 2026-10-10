@@ -85,9 +85,9 @@ pub use hybrid::{
     RouteRequest, RouteStats, RouteTrace, Router, TaskClass, Tier, Verifier,
 };
 pub use modality::{
-    AudioFormat, Capability, CapabilityService, EmbeddingParams, EmbeddingResponse, GeneratedImage,
-    ImageGenParams, ImageUnderstandingParams, Output, OutputCheck, Request, SpeechParams,
-    TextCapability, TranscriptResponse,
+    AudioFormat, EmbeddingParams, EmbeddingResponse, GeneratedImage, ImageGenParams,
+    ImageUnderstandingParams, Output, OutputCheck, Request, RequestKind, RequestService,
+    SpeechParams, TextService, TranscriptResponse,
 };
 pub use routed::{MultiHybridService, RoutedRequest};
 pub use service::InferenceService;

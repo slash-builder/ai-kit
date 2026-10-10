@@ -385,12 +385,12 @@ impl InferenceService for CandleInferenceService {
             return Ok(());
         }
 
-        if model.capability() != crate::modality::Capability::TextGeneration {
+        if model.kind() != crate::modality::RequestKind::TextGeneration {
             return Err(AiKitError::ModelLoadFailed {
                 model_id: model_id.to_string(),
                 reason: format!(
                     "'{model_id}' is a {} model, not a text-generation model",
-                    model.capability().as_str()
+                    model.kind().as_str()
                 ),
             });
         }

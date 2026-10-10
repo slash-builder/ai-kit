@@ -137,13 +137,13 @@ pub struct ModelFile {
 }
 
 impl ModelMetadata {
-    /// Which kind of work this model does (`metadata.custom["capability"]`; absent means text generation).
-    pub fn capability(&self) -> crate::modality::Capability {
+    /// Which kind of work this model does (`metadata.custom["kind"]`; absent means text generation).
+    pub fn kind(&self) -> crate::modality::RequestKind {
         self.metadata
             .custom
-            .get("capability")
+            .get("kind")
             .and_then(|c| c.parse().ok())
-            .unwrap_or(crate::modality::Capability::TextGeneration)
+            .unwrap_or(crate::modality::RequestKind::TextGeneration)
     }
 
     /// Main file plus every extra file, in bytes.

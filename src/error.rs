@@ -53,9 +53,19 @@ pub enum AiKitError {
         available_mb: u32,
     },
 
-    /// No configured backend provides the requested capability (or none the caller may use).
-    #[error("Capability '{capability}' is not available: {reason}")]
-    UnsupportedCapability { capability: String, reason: String },
+    /// No configured backend provides the requested request kind (or none the caller may use).
+    #[error("Request kind '{request_kind}' is not available: {reason}")]
+    UnsupportedKind {
+        request_kind: String,
+        reason: String,
+    },
+
+    /// The only tier that could serve this request is the cloud, and the content is private.
+    /// The caller must mark the content shareable (and be allowed to) for it to run.
+    #[error(
+        "Request kind '{request_kind}' can only run in the cloud tier and the content is private"
+    )]
+    RequiresShareable { request_kind: String },
 
     /// Model integrity verification failed (BLAKE3 hash mismatch).
     #[error("Model integrity check failed for {model_id}: expected hash {expected}, got {actual}")]
@@ -77,11 +87,11 @@ pub enum AiKitError {
     #[error("Session cache inconsistency for {session_id}: {reason}")]
     CacheInconsistency { session_id: String, reason: String },
 
-    /// Capability grant check failed or is missing.
+    /// RequestKind grant check failed or is missing.
     ///
     /// Note: Per decision memo #1, AI Kit trusts Hearth's capability check at call boundary.
     /// This error should only occur if Hearth fails to enforce the check (design violation).
-    #[error("Capability check failed for app {app_id} on model {model_id}")]
+    #[error("RequestKind check failed for app {app_id} on model {model_id}")]
     CapabilityDenied { app_id: String, model_id: String },
 
     /// A remote proxy backend (e.g. the `claude-proxy` feature's Anthropic
@@ -112,20 +122,67 @@ pub enum AiKitError {
     JsonError(#[from] serde_json::Error),
 }
 
+/// Error codes for the inference wire contract (`hearth.inference.v1`), proposed by messaging-architect (2026-10-10).
+///
+/// These are carried in an `InferenceError` payload, never in the fabric `RError`/`ErrorCode`: that space is the
+/// fabric's, and the numbers the earlier design used (20-24) are already `TOPIC_INVALID`..`SUBSCRIBE_RATE_LIMITED` there.
+/// Values are provisional until the proto is ratified; do not hard-code them elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+#[non_exhaustive]
+pub enum InferenceErrorCode {
+    Unspecified = 0,
+    ModelNotFound = 1,
+    Timeout = 2,
+    CacheEvicted = 3,
+    QuantizationUnsupported = 4,
+    Oom = 5,
+    InvalidParams = 6,
+    /// No tier on this device can do the requested kind of work.
+    RequestKindUnsupported = 7,
+    /// Only the cloud could do it and the content is private.
+    RequiresShareable = 8,
+    VerificationFailed = 9,
+    RemoteBackendFailed = 10,
+    Cancelled = 11,
+    ContentUnavailable = 12,
+    /// Integrity or load failure. The message must not include hashes.
+    ModelUnavailable = 13,
+    Internal = 15,
+}
+
 impl AiKitError {
-    /// Map AI Kit error to approximate Hearth ErrorCode (for Message Kit transport).
+    /// The wire error code for this error (see [`InferenceErrorCode`]).
     ///
-    /// # Mapping
+    /// `CapabilityDenied` is a Score Kit grant failure that should be enforced at the Message Kit boundary and never
+    /// reach inference; if it does, it is reported as `Internal` so it raises an alert, not as a permissions answer.
+    pub fn to_inference_error_code(&self) -> InferenceErrorCode {
+        use InferenceErrorCode as C;
+        match self {
+            AiKitError::ModelNotFound { .. } => C::ModelNotFound,
+            AiKitError::InferenceTimeout { .. } => C::Timeout,
+            AiKitError::CacheEvicted { .. } => C::CacheEvicted,
+            AiKitError::QuantizationUnsupported { .. } => C::QuantizationUnsupported,
+            AiKitError::InferenceOom { .. } => C::Oom,
+            AiKitError::InvalidParams { .. } => C::InvalidParams,
+            AiKitError::UnsupportedKind { .. } => C::RequestKindUnsupported,
+            AiKitError::RequiresShareable { .. } => C::RequiresShareable,
+            AiKitError::RemoteBackendError { .. } => C::RemoteBackendFailed,
+            AiKitError::ModelLoadFailed { .. } | AiKitError::IntegrityCheckFailed { .. } => {
+                C::ModelUnavailable
+            }
+            _ => C::Internal,
+        }
+    }
+
+    /// Map to a fabric `ErrorCode`.
     ///
-    /// - `ModelNotFound` → 20 (MODEL_NOT_FOUND)
-    /// - `InferenceTimeout` → 21 (INFERENCE_TIMEOUT)
-    /// - `CacheEvicted` → 22 (CACHE_EVICTED)
-    /// - `QuantizationUnsupported` → 23 (QUANTIZATION_UNSUPPORTED)
-    /// - `InferenceOom` → 24 (INFERENCE_OOM)
-    /// - `CapabilityDenied` → 13 (PERMISSION_DENIED)
-    /// - others (including `RemoteBackendError` and `UnsupportedCapability`, no dedicated codes allocated yet) → 90 (INTERNAL)
-    ///
-    /// TODO: Once messaging-architect confirms the error code allocations, pin these values.
+    /// # Deprecated: this mapping is wrong
+    /// The fabric `ErrorCode` numbers 20-24 are `TOPIC_INVALID`, `TOPIC_UNAUTHORIZED`, `SUBSCRIPTION_NOT_FOUND`,
+    /// `PUBLISH_RATE_LIMITED` and `SUBSCRIBE_RATE_LIMITED`; 13 is `ENVELOPE_TOO_LARGE`; 90 is the ops-alert `INTERNAL`. So
+    /// a remote peer could trigger an ops alert, and a grant failure looked like an oversized message. Kept only so existing
+    /// callers compile; use [`AiKitError::to_inference_error_code`].
+    #[deprecated(note = "collides with the fabric ErrorCode space; use to_inference_error_code")]
     pub fn to_error_code(&self) -> i32 {
         match self {
             AiKitError::ModelNotFound { .. } => 20,
@@ -144,16 +201,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_error_code_mapping() {
-        let err = AiKitError::ModelNotFound {
-            model_id: "llama2-7b".to_string(),
-        };
-        assert_eq!(err.to_error_code(), 20);
+    fn wire_codes_cover_every_router_outcome() {
+        use InferenceErrorCode as C;
+        let cases = [
+            (
+                AiKitError::ModelNotFound {
+                    model_id: "m".into(),
+                },
+                C::ModelNotFound,
+            ),
+            (
+                AiKitError::InferenceOom {
+                    model_id: "m".into(),
+                    required_mb: 2,
+                    available_mb: 1,
+                },
+                C::Oom,
+            ),
+            (
+                AiKitError::InvalidParams { reason: "r".into() },
+                C::InvalidParams,
+            ),
+            (
+                AiKitError::UnsupportedKind {
+                    request_kind: "image_generation".into(),
+                    reason: "r".into(),
+                },
+                C::RequestKindUnsupported,
+            ),
+            (
+                AiKitError::RequiresShareable {
+                    request_kind: "image_understanding".into(),
+                },
+                C::RequiresShareable,
+            ),
+            (
+                AiKitError::RemoteBackendError {
+                    backend: "b".into(),
+                    reason: "r".into(),
+                },
+                C::RemoteBackendFailed,
+            ),
+            (
+                AiKitError::ModelLoadFailed {
+                    model_id: "m".into(),
+                    reason: "r".into(),
+                },
+                C::ModelUnavailable,
+            ),
+            (
+                AiKitError::IntegrityCheckFailed {
+                    model_id: "m".into(),
+                    expected: "a".into(),
+                    actual: "b".into(),
+                },
+                C::ModelUnavailable,
+            ),
+            (AiKitError::Internal { reason: "r".into() }, C::Internal),
+        ];
+        for (err, want) in cases {
+            assert_eq!(err.to_inference_error_code(), want, "{err}");
+        }
+    }
 
-        let err = AiKitError::CapabilityDenied {
-            app_id: "app123".to_string(),
-            model_id: "llama2-7b".to_string(),
+    #[test]
+    fn a_grant_failure_is_reported_as_internal_not_as_a_permissions_answer() {
+        let e = AiKitError::CapabilityDenied {
+            app_id: "a".into(),
+            model_id: "m".into(),
         };
-        assert_eq!(err.to_error_code(), 13);
+        assert_eq!(e.to_inference_error_code(), InferenceErrorCode::Internal);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn the_deprecated_fabric_mapping_is_still_the_old_one() {
+        // Documented as wrong; pinned so nobody "fixes" it silently and breaks a caller that already depends on it.
+        let e = AiKitError::CapabilityDenied {
+            app_id: "a".into(),
+            model_id: "m".into(),
+        };
+        assert_eq!(e.to_error_code(), 13);
     }
 }

@@ -175,10 +175,10 @@ impl ModelRegistry {
                 });
             }
 
-            if let Some(c) = model.metadata.custom.get("capability") {
-                if c.parse::<crate::modality::Capability>().is_err() {
+            if let Some(c) = model.metadata.custom.get("kind") {
+                if c.parse::<crate::modality::RequestKind>().is_err() {
                     return Err(crate::error::AiKitError::Internal {
-                        reason: format!("Model {} has unknown capability '{c}'", model.id),
+                        reason: format!("Model {} has unknown request kind '{c}'", model.id),
                     });
                 }
             }

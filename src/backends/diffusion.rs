@@ -1,6 +1,6 @@
 //! Text-to-image on Candle: the Stable Diffusion family with the distilled "turbo" sampler. **POC.**
 //!
-//! [`CandleImageService`] implements [`CapabilityService`] for [`Capability::ImageGeneration`]. It is pure Rust
+//! [`CandleImageService`] implements [`RequestService`] for [`RequestKind::ImageGeneration`]. It is pure Rust
 //! (Candle's CLIP text encoder, UNet and VAE; a Euler-ancestral scheduler; the `png` crate to encode) and runs on the CPU or, with
 //! the `cuda` feature, an NVIDIA GPU, under the same device policy as the text backend: an explicit device that is
 //! missing is an error, and a model that does not fit in free VRAM is an `InferenceOom` *before* any file is read.
@@ -28,7 +28,7 @@
 use crate::backends::candle::{check_vram, device_for, verify_model_files, DevicePreference};
 use crate::error::{AiKitError, Result};
 use crate::modality::{
-    unsupported, Capability, CapabilityService, GeneratedImage, ImageGenParams, Output, Request,
+    unsupported, GeneratedImage, ImageGenParams, Output, Request, RequestKind, RequestService,
 };
 use crate::registry::ModelRegistry;
 use crate::types::ModelMetadata;
@@ -89,12 +89,12 @@ impl CandleImageService {
             .ok_or_else(|| AiKitError::ModelNotFound {
                 model_id: id.to_string(),
             })?;
-        if m.capability() != Capability::ImageGeneration {
+        if m.kind() != RequestKind::ImageGeneration {
             return Err(AiKitError::ModelLoadFailed {
                 model_id: id.to_string(),
                 reason: format!(
                     "'{id}' is a {} model, not an image-generation model",
-                    m.capability().as_str()
+                    m.kind().as_str()
                 ),
             });
         }
@@ -288,16 +288,16 @@ impl CandleImageService {
 }
 
 #[async_trait]
-impl CapabilityService for CandleImageService {
-    fn capabilities(&self) -> Vec<Capability> {
-        vec![Capability::ImageGeneration]
+impl RequestService for CandleImageService {
+    fn kinds(&self) -> Vec<RequestKind> {
+        vec![RequestKind::ImageGeneration]
     }
 
     async fn handle(&self, req: Request) -> Result<Output> {
         match req {
             Request::ImageGeneration(p) => self.generate(&p).map(Output::Image),
             other => Err(unsupported(
-                other.capability(),
+                other.kind(),
                 "this is an image-generation backend",
             )),
         }
