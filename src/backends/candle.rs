@@ -111,7 +111,8 @@ const VRAM_OVERHEAD_FLOOR_MB: u64 = 384;
 struct LoadedCandleModel {
     weights: Mutex<ModelWeights>,
     tokenizer: Tokenizer,
-    eos_token_id: u32,
+    /// Every token that ends a reply for this model (see `end_token_ids`).
+    eos_token_ids: Vec<u32>,
     device: Device,
     device_label: String,
 }
@@ -259,6 +260,14 @@ impl InferenceService for CandleInferenceService {
                 "<|system|>\nYou are a helpful assistant.</s>\n<|user|>\n{}</s>\n<|assistant|>\n",
                 params.prompt
             ),
+            Some("llama3") => format!(
+                "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+                params.prompt
+            ),
+            Some("chatml") => format!(
+                "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                params.prompt
+            ),
             _ => params.prompt.clone(),
         };
 
@@ -306,7 +315,7 @@ impl InferenceService for CandleInferenceService {
                         reason: e.to_string(),
                     })?;
 
-            if next_token == loaded.eos_token_id {
+            if loaded.eos_token_ids.contains(&next_token) {
                 break;
             }
             generated.push(next_token);
@@ -413,7 +422,14 @@ impl InferenceService for CandleInferenceService {
                 model_id: model_id.to_string(),
                 reason: format!("tokenizer load failed: {e}"),
             })?;
-        let eos_token_id = tokenizer.token_to_id("</s>").unwrap_or(2);
+        let eos_token_ids = end_token_ids(&tokenizer);
+        if eos_token_ids.is_empty() {
+            return Err(AiKitError::ModelLoadFailed {
+                model_id: model_id.to_string(),
+                reason: "tokenizer has none of the known end-of-reply tokens, so generation could not stop"
+                    .to_string(),
+            });
+        }
 
         // The raw bytes now only back `cache.rs`'s bookkeeping, so hand them over
         // instead of cloning (the weights above already own the tensors).
@@ -427,7 +443,7 @@ impl InferenceService for CandleInferenceService {
         let loaded = LoadedCandleModel {
             weights: Mutex::new(weights),
             tokenizer,
-            eos_token_id,
+            eos_token_ids,
             device,
             device_label,
         };
@@ -493,6 +509,23 @@ fn tensor_1x_n(tokens: &[u32], device: &Device) -> Result<Tensor> {
         .map_err(|e| AiKitError::Internal {
             reason: format!("tensor build failed: {e}"),
         })
+}
+
+/// Tokens that end a reply, for whichever chat format the model uses. The CPU POC looked up only
+/// `</s>` and silently fell back to token id 2, which for Llama-3 is the plain `#` token: it never
+/// stopped at `<|eot_id|>` and ran on, inventing further turns, until `max_tokens`.
+fn end_token_ids(tokenizer: &Tokenizer) -> Vec<u32> {
+    [
+        "</s>",
+        "<|eot_id|>",
+        "<|end_of_text|>",
+        "<|im_end|>",
+        "<|endoftext|>",
+        "<|end|>",
+    ]
+    .iter()
+    .filter_map(|t| tokenizer.token_to_id(t))
+    .collect()
 }
 
 /// Open CUDA device `ordinal`, returning it with a label such as
