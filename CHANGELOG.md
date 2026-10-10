@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Hybrid local/cloud routing (POC, not ruled on): `HybridInferenceService`, `Router`, `RoutePolicy` (YAML), `Privacy` (default `Private`, fail closed), `Verifier`, `RouteTrace`/`RouteStats`,
+  a keyword `classify()`, and `ai-kit-cli route` (`--explain`, `--batch`, `--cloud-cmd`, `--policy`). Private content never reaches the cloud; raster images are delegated, not attempted.
+- `chat_template: llama3` and `chatml` for the Candle backend.
 - NVIDIA GPU (CUDA) support for the Candle backend, behind the opt-in `cuda` feature (off by default; not part of CI).
   `DevicePreference` (`cpu` | `cuda[:N]` | `auto`), `CandleInferenceService::with_device`, `device_of`, `describe_cuda_devices`.
   An explicit CUDA device that is missing, or a model larger than the GPU's free memory, is a hard error
@@ -31,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests for types, errors, registry, cache.
 
 ### Changed
+- Candle backend: stop on every end-of-reply token the tokenizer has (`</s>`, `<|eot_id|>`, `<|end_of_text|>`, `<|im_end|>`, ...). It used to look up only `</s>` and fall back to token id 2
+  (the plain `#` token for Llama-3), so replies ran on past `<|eot_id|>` into invented further turns. `load_model` now fails if the tokenizer has none of them.
 - `CandleInferenceService` builds `ModelWeights` once in `load_model` and reuses it (one request at a time per model) instead of
   rebuilding from raw bytes on every `infer()`; request isolation relies on Candle resetting its KV cache at position 0 and is covered by a test.
   `load_model` on an already-loaded model is now a no-op.

@@ -64,6 +64,7 @@
 pub mod backends;
 pub mod cache;
 pub mod error;
+pub mod hybrid;
 pub mod registry;
 pub mod service;
 pub mod types;
@@ -74,6 +75,10 @@ pub use backends::{describe_cuda_devices, CandleInferenceService, DevicePreferen
 #[cfg(feature = "claude-proxy")]
 pub use backends::{ClaudeProxyConfig, ClaudeProxyInferenceService};
 pub use error::{AiKitError, Result};
+pub use hybrid::{
+    classify, ClassPolicy, Decision, HybridInferenceService, Plan, Privacy, RoutePolicy,
+    RouteRequest, RouteStats, RouteTrace, Router, TaskClass, Tier, Verifier,
+};
 pub use service::InferenceService;
 pub use types::{InferenceParams, InferenceResponse, ModelMetadata};
 
