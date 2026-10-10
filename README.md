@@ -107,13 +107,20 @@ choice stays visible through `device_of`.
 | | CPU (`--device cpu`) | GPU (`--device cuda`) | llama.cpp on the same GPU (Ollama) |
 |---|---|---|---|
 | prompt processing, 244 tokens | 3 tok/s | **1,630 tok/s** | |
-| prompt processing, 1,531 tokens | ~3 tok/s | **1,345 tok/s** | ~3,800 tok/s |
-| decode, short context | 2.3 tok/s | **89 tok/s** | |
-| decode, 1,531-token context | | **43 tok/s** | ~113 tok/s |
+| prompt processing, 1,531 tokens | ~3 tok/s | **1,345 tok/s** | ~4,300 tok/s |
+| decode, short context | 2.3 tok/s | **89 tok/s** | ~108 tok/s |
+| decode, 1,531-token context | | **43 tok/s** | ~100 tok/s |
 | model load (read + hash + parse + upload) | 6.5 s | 5 s | |
 
-So about 40x faster decoding and 500x faster prompt processing than the CPU, and roughly 35-40% of what llama.cpp reaches on the same card.
+So about 40x faster decoding and 500x faster prompt processing than the CPU, and 80-85% of llama.cpp's decode speed at short context, falling to 30-45% at 1.5k tokens of context.
 The very first request on a machine also pays a one-time kernel JIT (~12 s here); the driver caches it on disk afterwards.
+
+**Why it is slower than llama.cpp** (measured with a standalone benchmark against Candle 0.9.2, same model and GPU): the gap is small for a short
+prompt and grows with context, because `quantized_llama` (a) appends to the KV cache with `Tensor::cat` every token, copying the whole cache, and
+(b) expands the grouped K/V heads with `repeat_kv`, in F32, with no fused attention. Those two cost about 2 ms per token at 128 tokens of context and 12 ms at
+1,531, which is most of the slowdown from 94 to 41 tok/s; llama.cpp's decode barely moves (110 to ~100 tok/s). Prompt processing falls with length for
+the same reason (the attention scores are materialised and the weights are dequantised to f16 for cuBLAS). Sampling with `top_p` (what `ask` uses) copies and sorts all
+128,256 logits on the CPU every token and roughly halves decode speed at short context; greedy decoding does not. Fixing these means changing the vendored model code, not Candle's CUDA kernels.
 
 **What changed in the backend to make this sensible.** The CPU POC rebuilt the whole model from raw bytes on every `infer()`;
 on a GPU that would re-upload the weights to VRAM per request. The weights are now built once at `load_model` and reused, one
