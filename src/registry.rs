@@ -175,6 +175,26 @@ impl ModelRegistry {
                 });
             }
 
+            if let Some(c) = model.metadata.custom.get("capability") {
+                if c.parse::<crate::modality::Capability>().is_err() {
+                    return Err(crate::error::AiKitError::Internal {
+                        reason: format!("Model {} has unknown capability '{c}'", model.id),
+                    });
+                }
+            }
+            if let Some(f) = model
+                .files
+                .iter()
+                .find(|f| f.hash.is_empty() || f.role.is_empty())
+            {
+                return Err(crate::error::AiKitError::Internal {
+                    reason: format!(
+                        "Model {} has a file ('{}') with no role or no hash",
+                        model.id, f.role
+                    ),
+                });
+            }
+
             if model.metadata.vram_required_mb == 0 {
                 return Err(crate::error::AiKitError::Internal {
                     reason: format!("Model {} has zero VRAM requirement", model.id),
@@ -209,6 +229,7 @@ mod tests {
                 framework: "candle".to_string(),
                 custom: Default::default(),
             },
+            files: Vec::new(),
         }
     }
 

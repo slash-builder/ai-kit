@@ -76,6 +76,8 @@ Implementation can proceed on locked constraints; these are design decisions, no
 
 - **`src/hybrid.rs`**: `HybridInferenceService`, `Router`, `RoutePolicy`, `Privacy`, `Verifier`, `RouteTrace` (POC, always compiled, no network). Local-first/cloud-escalation routing with a fail-closed privacy gate; see README "Hybrid local/cloud routing". **Unruled** (cloud tier is deferred; the Claude proxy needs a privacy ruling). `ai-kit-cli route` is the dev driver (its cloud adapter shells out to a command).
 
+- **`src/modality.rs`, `src/routed.rs`, `src/backends/diffusion.rs`, `src/backends/embedding.rs`**: the general request contract (`Capability`, `Request`, `Output`, `CapabilityService`, `OutputCheck`), `MultiHybridService` (capability-aware routing for any kind of request, same privacy rules as the text router), and real Candle backends for image generation (`sd-turbo`) and embeddings (BERT). Image understanding and speech are typed but have no backend (they return `UnsupportedCapability`). Dev weights are not for commercial use; see README "Any kind of request".
+
 ### Future (Stubs)
 
 - **`src/proto/`**: Message Kit bindings (TODO, awaiting proto finalization).

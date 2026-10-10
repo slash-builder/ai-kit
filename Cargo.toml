@@ -64,6 +64,8 @@ candle-core = { version = "0.9", optional = true }
 candle-nn = { version = "0.9", optional = true }
 candle-transformers = { version = "0.9", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
+# PNG encoder for the image backend (pure Rust).
+png = { version = "0.17", optional = true }
 # tflite = "0.1"  # Optional TensorFlow Lite, still deferred
 
 # Remote proxy backend (Claude/Anthropic Messages API). Optional + feature-gated
@@ -85,7 +87,7 @@ default = []
 # (Jenkinsfile: cargo test / fmt / clippy / build --release, no flags)
 # untouched, since it pulls a real ML toolchain + requires `make fetch-model`
 # to have downloaded weights for anything beyond `cargo build` to be useful.
-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:png"]
 
 # NVIDIA GPU inference through Candle's CUDA backend. Implies `candle`. Off by
 # default and NOT part of CI (Jenkinsfile): it needs nvcc + the CUDA runtime

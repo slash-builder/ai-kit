@@ -65,13 +65,18 @@ pub mod backends;
 pub mod cache;
 pub mod error;
 pub mod hybrid;
+pub mod modality;
 pub mod registry;
+pub mod routed;
 pub mod service;
 pub mod types;
 
 // Re-export key types at crate root
 #[cfg(feature = "candle")]
-pub use backends::{describe_cuda_devices, CandleInferenceService, DevicePreference};
+pub use backends::{
+    describe_cuda_devices, CandleEmbeddingService, CandleImageService, CandleInferenceService,
+    DevicePreference,
+};
 #[cfg(feature = "claude-proxy")]
 pub use backends::{ClaudeProxyConfig, ClaudeProxyInferenceService};
 pub use error::{AiKitError, Result};
@@ -79,8 +84,14 @@ pub use hybrid::{
     classify, ClassPolicy, Decision, HybridInferenceService, Plan, Privacy, RoutePolicy,
     RouteRequest, RouteStats, RouteTrace, Router, TaskClass, Tier, Verifier,
 };
+pub use modality::{
+    AudioFormat, Capability, CapabilityService, EmbeddingParams, EmbeddingResponse, GeneratedImage,
+    ImageGenParams, ImageUnderstandingParams, Output, OutputCheck, Request, SpeechParams,
+    TextCapability, TranscriptResponse,
+};
+pub use routed::{MultiHybridService, RoutedRequest};
 pub use service::InferenceService;
-pub use types::{InferenceParams, InferenceResponse, ModelMetadata};
+pub use types::{InferenceParams, InferenceResponse, ModelFile, ModelMetadata};
 
 /// Library version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

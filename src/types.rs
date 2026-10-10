@@ -119,6 +119,47 @@ pub struct ModelMetadata {
 
     /// Extended metadata.
     pub metadata: ModelMetadataExtended,
+
+    /// Further files of a multi-file model (an image model is a UNet, a VAE, a text encoder and a tokenizer;
+    /// the main file above is the largest). Each is hash-verified on load, like the main file.
+    #[serde(default)]
+    pub files: Vec<ModelFile>,
+}
+
+/// One extra file of a model, addressed by role (`vae`, `text_encoder`, `tokenizer`, `config`, ...).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelFile {
+    pub role: String,
+    pub location: String,
+    /// BLAKE3 hex digest.
+    pub hash: String,
+    pub size_bytes: u64,
+}
+
+impl ModelMetadata {
+    /// Which kind of work this model does (`metadata.custom["capability"]`; absent means text generation).
+    pub fn capability(&self) -> crate::modality::Capability {
+        self.metadata
+            .custom
+            .get("capability")
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(crate::modality::Capability::TextGeneration)
+    }
+
+    /// Main file plus every extra file, in bytes.
+    pub fn total_size_bytes(&self) -> u64 {
+        self.size_bytes + self.files.iter().map(|f| f.size_bytes).sum::<u64>()
+    }
+
+    /// Path of the extra file with this role (`file://` stripped).
+    pub fn file_path(&self, role: &str) -> Option<String> {
+        self.files.iter().find(|f| f.role == role).map(|f| {
+            f.location
+                .strip_prefix("file://")
+                .unwrap_or(&f.location)
+                .to_string()
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

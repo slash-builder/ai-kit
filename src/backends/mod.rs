@@ -17,6 +17,16 @@ pub mod candle;
 #[cfg(feature = "candle")]
 pub use candle::{describe_cuda_devices, CandleInferenceService, DevicePreference};
 
+#[cfg(feature = "candle")]
+pub mod diffusion;
+#[cfg(feature = "candle")]
+pub mod embedding;
+
+#[cfg(feature = "candle")]
+pub use diffusion::CandleImageService;
+#[cfg(feature = "candle")]
+pub use embedding::CandleEmbeddingService;
+
 #[cfg(feature = "claude-proxy")]
 pub mod claude_proxy;
 

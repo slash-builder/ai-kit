@@ -166,13 +166,7 @@ impl CandleInferenceService {
             model_id: model_id.to_string(),
             reason,
         };
-        match self.device_pref {
-            DevicePreference::Cpu => Ok((Device::Cpu, "cpu".to_string())),
-            DevicePreference::Cuda(n) => cuda_device(n).map_err(fail),
-            DevicePreference::Auto => {
-                Ok(cuda_device(0).unwrap_or((Device::Cpu, "cpu".to_string())))
-            }
-        }
+        device_for(self.device_pref).map_err(fail)
     }
 
     fn model_meta(&self, model_id: &str) -> Result<ModelMetadata> {
@@ -391,6 +385,15 @@ impl InferenceService for CandleInferenceService {
             return Ok(());
         }
 
+        if model.capability() != crate::modality::Capability::TextGeneration {
+            return Err(AiKitError::ModelLoadFailed {
+                model_id: model_id.to_string(),
+                reason: format!(
+                    "'{model_id}' is a {} model, not a text-generation model",
+                    model.capability().as_str()
+                ),
+            });
+        }
         let (device, device_label) = self.resolve_device(model_id)?;
         // Decide whether it fits *before* reading a multi-GB file.
         check_vram(&device, &model)?;
@@ -528,10 +531,50 @@ fn end_token_ids(tokenizer: &Tokenizer) -> Vec<u32> {
     .collect()
 }
 
+/// Turn a [`DevicePreference`] into a device and a label, failing hard (no silent CPU fallback) unless `Auto`.
+pub(crate) fn device_for(pref: DevicePreference) -> std::result::Result<(Device, String), String> {
+    match pref {
+        DevicePreference::Cpu => Ok((Device::Cpu, "cpu".to_string())),
+        DevicePreference::Cuda(n) => cuda_device(n),
+        DevicePreference::Auto => Ok(cuda_device(0).unwrap_or((Device::Cpu, "cpu".to_string()))),
+    }
+}
+
+/// BLAKE3 of a file, streamed (model files can be gigabytes).
+pub(crate) fn hash_file(path: &str) -> Result<String> {
+    let mut h = blake3::Hasher::new();
+    h.update_reader(std::fs::File::open(path)?)?;
+    Ok(h.finalize().to_hex().to_string())
+}
+
+/// Verify the main file and every extra file of a model against the catalog's hashes. Returns the main file's path.
+pub(crate) fn verify_model_files(model: &ModelMetadata) -> Result<String> {
+    let strip = |l: &str| l.strip_prefix("file://").unwrap_or(l).to_string();
+    let main = strip(&model.location);
+    let mut checks = vec![(main.clone(), model.hash.clone())];
+    checks.extend(
+        model
+            .files
+            .iter()
+            .map(|f| (strip(&f.location), f.hash.clone())),
+    );
+    for (path, expected) in checks {
+        let actual = hash_file(&path)?;
+        if actual != expected {
+            return Err(AiKitError::IntegrityCheckFailed {
+                model_id: model.id.clone(),
+                expected,
+                actual,
+            });
+        }
+    }
+    Ok(main)
+}
+
 /// Open CUDA device `ordinal`, returning it with a label such as
 /// `cuda:0 (NVIDIA GeForce RTX 3060)`. The error string says what to fix.
 #[cfg(feature = "cuda")]
-fn cuda_device(ordinal: usize) -> std::result::Result<(Device, String), String> {
+pub(crate) fn cuda_device(ordinal: usize) -> std::result::Result<(Device, String), String> {
     let device = Device::new_cuda(ordinal)
         .map_err(|e| format!("CUDA device {ordinal} is not usable: {e}"))?;
     let name = device
@@ -545,7 +588,7 @@ fn cuda_device(ordinal: usize) -> std::result::Result<(Device, String), String> 
 }
 
 #[cfg(not(feature = "cuda"))]
-fn cuda_device(ordinal: usize) -> std::result::Result<(Device, String), String> {
+pub(crate) fn cuda_device(ordinal: usize) -> std::result::Result<(Device, String), String> {
     Err(format!(
         "CUDA device {ordinal} requested, but this ai-kit was built without the `cuda` \
          feature (rebuild with `--features cuda`)"
@@ -558,7 +601,7 @@ fn cuda_device(ordinal: usize) -> std::result::Result<(Device, String), String> 
 // (and unit-tested) in every build rather than hidden behind the feature.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 fn vram_needed_mb(model: &ModelMetadata) -> u64 {
-    let weights_mb = model.size_bytes.div_ceil(1 << 20);
+    let weights_mb = model.total_size_bytes().div_ceil(1 << 20);
     let overhead =
         ((weights_mb as f64 * VRAM_OVERHEAD_FRACTION) as u64).max(VRAM_OVERHEAD_FLOOR_MB);
     (weights_mb + overhead).max(u64::from(model.metadata.vram_required_mb))
@@ -567,7 +610,7 @@ fn vram_needed_mb(model: &ModelMetadata) -> u64 {
 /// Fail hard (`InferenceOom`, no spill to the CPU, no smaller quantisation) if a
 /// model cannot fit in the free memory of the chosen GPU. No-op on the CPU.
 #[cfg(feature = "cuda")]
-fn check_vram(device: &Device, model: &ModelMetadata) -> Result<()> {
+pub(crate) fn check_vram(device: &Device, model: &ModelMetadata) -> Result<()> {
     if !device.is_cuda() {
         return Ok(());
     }
@@ -595,7 +638,7 @@ fn check_vram(device: &Device, model: &ModelMetadata) -> Result<()> {
 }
 
 #[cfg(not(feature = "cuda"))]
-fn check_vram(_device: &Device, _model: &ModelMetadata) -> Result<()> {
+pub(crate) fn check_vram(_device: &Device, _model: &ModelMetadata) -> Result<()> {
     Ok(())
 }
 
@@ -656,6 +699,7 @@ mod tests {
                 framework: String::new(),
                 custom: HashMap::new(),
             },
+            files: Vec::new(),
         }
     }
 

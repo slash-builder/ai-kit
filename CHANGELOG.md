@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Any kind of request: a general `Request`/`Output` contract for five capabilities (text, image generation, image understanding, embeddings, speech-to-text), `CapabilityService`, `TextCapability`,
+  `OutputCheck`, and `AiKitError::UnsupportedCapability`. `MultiHybridService` routes any of them by which tier has the capability (then the usual privacy/fit/policy rules), re-types free text
+  that is really an image request, and counts bytes sent to the cloud (`RouteStats::cloud_payload_bytes`). `Plan::Unavailable`; new `TaskClass` values.
+- Real backends: `CandleImageService` (Stable Diffusion "turbo" on Candle, CPU/CUDA, PNG out) and `CandleEmbeddingService` (BERT sentence encoder). Multi-file catalog entries (`files:`, each BLAKE3-verified) and `metadata.custom.capability`.
+- `ai-kit-cli imagine`, `ai-kit-cli embed`; `route` now takes batch lines of any kind.
 - Hybrid local/cloud routing (POC, not ruled on): `HybridInferenceService`, `Router`, `RoutePolicy` (YAML), `Privacy` (default `Private`, fail closed), `Verifier`, `RouteTrace`/`RouteStats`,
   a keyword `classify()`, and `ai-kit-cli route` (`--explain`, `--batch`, `--cloud-cmd`, `--policy`). Private content never reaches the cloud; raster images are delegated, not attempted.
 - `chat_template: llama3` and `chatml` for the Candle backend.

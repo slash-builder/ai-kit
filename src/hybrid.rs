@@ -68,8 +68,15 @@ pub enum TaskClass {
     Reason,
     /// Vector graphics as SVG source (text out, so it can run on either tier).
     Svg,
-    /// Raster images (photo, painting). Not text; delegated.
+    /// Raster images (photo, painting). Not text; the text-only [`HybridInferenceService`] delegates them,
+    /// [`crate::routed::MultiHybridService`] runs them on a backend that has the capability.
     ImageRaster,
+    /// A question about a given image.
+    ImageUnderstanding,
+    /// Turn texts into vectors.
+    Embedding,
+    /// Transcribe audio.
+    SpeechToText,
     /// Anything else.
     Other,
 }
@@ -215,6 +222,8 @@ pub enum Plan {
     Run { first: Tier, escalate: bool },
     /// Not something this service can run; the caller must use `capability`.
     Delegate { capability: String },
+    /// No configured tier can serve this request, or none this content is allowed to reach.
+    Unavailable { capability: String, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -402,6 +411,107 @@ impl Router {
     }
 }
 
+impl Router {
+    /// Capability-aware decision for any kind of request.
+    ///
+    /// `local_has` / `cloud_has` say whether each tier has a backend for `cap`. The rules:
+    /// nobody has it -> `Unavailable`; only the cloud has it -> cloud if the content may go, otherwise
+    /// `Unavailable` (we do not silently use a different kind of model, and we do not leak private content to get an answer);
+    /// only local has it -> local; both -> the same text policy as [`Router::decide`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_multi(
+        &self,
+        cap: crate::modality::Capability,
+        class: TaskClass,
+        privacy: Privacy,
+        prompt_tokens: u32,
+        local_has: bool,
+        cloud_has: bool,
+        has_verifier: bool,
+    ) -> Decision {
+        let cap_s = cap.as_str().to_string();
+        let mut reasons = Vec::new();
+        let done = |plan, reasons| Decision {
+            class,
+            plan,
+            reasons,
+        };
+        let cloud_ok = cloud_has && privacy == Privacy::Shareable;
+        match (local_has, cloud_has) {
+            (false, false) => {
+                reasons.push("no configured backend provides this capability".to_string());
+                done(
+                    Plan::Unavailable {
+                        capability: cap_s,
+                        reason: "no configured backend provides it".to_string(),
+                    },
+                    reasons,
+                )
+            }
+            (false, true) if !cloud_ok => {
+                reasons.push("only the cloud tier provides this capability".to_string());
+                reasons.push("privacy=private: content never leaves the device".to_string());
+                done(
+                    Plan::Unavailable {
+                        capability: cap_s,
+                        reason: "only the cloud tier provides it and the content is private"
+                            .to_string(),
+                    },
+                    reasons,
+                )
+            }
+            (false, true) => {
+                reasons.push("only the cloud tier provides this capability".to_string());
+                done(
+                    Plan::Run {
+                        first: Tier::Cloud,
+                        escalate: false,
+                    },
+                    reasons,
+                )
+            }
+            (true, false) => {
+                reasons.push("only the local tier provides this capability".to_string());
+                done(
+                    Plan::Run {
+                        first: Tier::Local,
+                        escalate: false,
+                    },
+                    reasons,
+                )
+            }
+            (true, true) => {
+                if cap == crate::modality::Capability::TextGeneration {
+                    // Both tiers have text: the original policy (privacy gate, fit, class table).
+                    return self.decide(class, privacy, prompt_tokens, true, has_verifier);
+                }
+                if !cloud_ok {
+                    reasons.push("privacy=private: content never leaves the device".to_string());
+                    return done(
+                        Plan::Run {
+                            first: Tier::Local,
+                            escalate: false,
+                        },
+                        reasons,
+                    );
+                }
+                let cp = self.policy.for_class(class);
+                reasons.push(format!(
+                    "both tiers have {cap_s}; policy for {class:?}: first={:?}, cascade={}",
+                    cp.first, cp.cascade
+                ));
+                done(
+                    Plan::Run {
+                        first: cp.first,
+                        escalate: cp.first == Tier::Local && cp.cascade && has_verifier,
+                    },
+                    reasons,
+                )
+            }
+        }
+    }
+}
+
 /// One tier call within a routed request.
 #[derive(Debug, Clone, Serialize)]
 pub struct Attempt {
@@ -434,6 +544,8 @@ pub struct RouteStats {
     pub blocked_by_privacy: u64,
     pub cloud_prompt_tokens: u64,
     pub cloud_completion_tokens: u64,
+    /// Bytes of request content sent to a cloud tier (text, images, audio), whatever the kind. Set by `MultiHybridService`.
+    pub cloud_payload_bytes: u64,
 }
 
 /// A local service, an optional cloud one, and the router between them.
@@ -570,6 +682,15 @@ impl HybridInferenceService {
                         "this request needs the '{capability}' capability, which InferenceService (text in, text out) does not provide"
                     ),
                 })
+            }
+            Plan::Unavailable {
+                ref capability,
+                ref reason,
+            } => {
+                return Err(crate::modality::unsupported(
+                    capability.parse().unwrap_or(crate::modality::Capability::TextGeneration),
+                    reason.clone(),
+                ))
             }
             Plan::Run { first, escalate } => (first, escalate),
         };

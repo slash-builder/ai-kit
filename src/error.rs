@@ -53,6 +53,10 @@ pub enum AiKitError {
         available_mb: u32,
     },
 
+    /// No configured backend provides the requested capability (or none the caller may use).
+    #[error("Capability '{capability}' is not available: {reason}")]
+    UnsupportedCapability { capability: String, reason: String },
+
     /// Model integrity verification failed (BLAKE3 hash mismatch).
     #[error("Model integrity check failed for {model_id}: expected hash {expected}, got {actual}")]
     IntegrityCheckFailed {
@@ -119,7 +123,7 @@ impl AiKitError {
     /// - `QuantizationUnsupported` → 23 (QUANTIZATION_UNSUPPORTED)
     /// - `InferenceOom` → 24 (INFERENCE_OOM)
     /// - `CapabilityDenied` → 13 (PERMISSION_DENIED)
-    /// - others (including `RemoteBackendError`, no dedicated code allocated yet) → 90 (INTERNAL)
+    /// - others (including `RemoteBackendError` and `UnsupportedCapability`, no dedicated codes allocated yet) → 90 (INTERNAL)
     ///
     /// TODO: Once messaging-architect confirms the error code allocations, pin these values.
     pub fn to_error_code(&self) -> i32 {

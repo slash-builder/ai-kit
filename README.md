@@ -165,6 +165,44 @@ Making household data private costs the 3B tier 8 points of accuracy and the 12B
 **Known limits.** The classifier is a few keyword rules (81/82 on the study prompts, which it was written against, so optimistic). Verifiers check constraints, not quality. Cloud use is counted in calls and tokens, not priced.
 No audit wiring yet (`RouteTrace` carries the data). Raster images are only *delegated*; there is no image service.
 
+## Any kind of request — multimodal (POC)
+
+`InferenceService` stays text-in/text-out and frozen. Next to it, `src/modality.rs` defines a general contract: a `Request` / `Output` envelope for **five capabilities**
+(text generation, image generation, image understanding, embeddings, speech-to-text), a `CapabilityService` trait ("I can do these; give me a request"), and `TextCapability`
+to lift any existing text backend into it. `MultiHybridService` (`src/routed.rs`) routes any of them across a local and a cloud tier by **which tier has the capability**,
+then by the same privacy, fit and policy rules as the text router.
+
+"Ready for any kind of request" means: every kind is representable and validated; a request nobody can serve gets a typed `UnsupportedCapability` with the reason (never a
+wrong-kind-of-model answer); a request only the cloud could serve, with private content, is unavailable rather than leaked; and free text that is really a picture request
+("paint me a watercolor of a lighthouse") is re-typed and runs on an image backend if one exists.
+
+| capability | contract | local backend today | cloud tier today |
+|---|---|---|---|
+| text generation | yes | Candle, plain-Llama GGUF (CPU/CUDA) | Claude (dev adapter; proxy unruled) |
+| **image generation** | yes | **Candle Stable Diffusion, `sd-turbo` (pure Rust, CPU/CUDA)** | none (Claude cannot make raster images) |
+| **embeddings** | yes | **Candle BERT, e.g. all-MiniLM-L6-v2 (384-d)** | none, by design (household files are private) |
+| image understanding | yes | none | none wired (a Claude backend could declare it) |
+| speech-to-text | yes | none | none |
+
+```bash
+ai-kit-cli imagine --catalog catalog.yaml --model sd-turbo --prompt "a watercolor of a misty cottage" --seed 7 --out cottage.png --device cuda
+ai-kit-cli embed   --catalog catalog.yaml --model minilm --query "who is the vet?" --text "Trash is Tuesday" --text "The vet is Dr. Okafor"
+ai-kit-cli route   --catalog catalog.yaml --batch mixed.jsonl --local-model llama32-3b --image-model sd-turbo --embed-model minilm --device cuda --cloud-cmd '...'
+```
+`route --batch` lines take `"kind": "text_generation" | "image_generation" | "embedding" | "speech_to_text" | "image_understanding"`. `--explain` shows every decision without loading a model.
+
+**Multi-file models.** An image model is a UNet, a VAE, a text encoder and a tokenizer, so a catalog entry has a `files:` list and `metadata.custom.capability`; **every file is BLAKE3-verified** on load, and the VRAM check counts all of them.
+
+**Measured** (RTX 3060 12 GB; `sd-turbo` 512x512): ~1.3-1.5 s per image once warm (about 5.6 s for the first request, which includes CUDA setup), ~100 s on the CPU; 384-d embeddings in tens of ms. The whole local stack
+(3B text model + `sd-turbo` + MiniLM) peaks about 9.8 GB above idle, so it fits one 12 GB card without much room to spare.
+
+**Read before relying on it.**
+- **Licence:** the dev image weights (`stabilityai/sd-turbo`) are under Stability AI's non-commercial research licence. A product needs a commercially licensed model. Candle 0.11 cannot run the studio's Z-Image-Turbo (Apache-2.0) on a 12 GB card (no quantised loader, no offload).
+- Image quality is that of a small distilled model: coherent, but it follows prompts loosely ("dusk" came out as daylight).
+- Reproducibility: the seed fixes the starting noise on every device; later sampler steps use Candle's RNG, which only CUDA can seed, so use `steps = 1` when you need identical images everywhere.
+- No img2img, inpainting, LoRA or batching. No audio or vision backend yet (the contract and the honest errors are in place). Output sanity checks (`OutputCheck::Sane`) catch blank or wrong-size images and malformed embeddings, not poor quality.
+- The cloud tier for non-text capabilities is empty; adding one is a `CapabilityService` implementation.
+
 ## Cloud Proxy Inference — Claude/Anthropic (experimental, not yet ruled on)
 
 **This is explicitly a `v0.2+` feature, off by default, and not yet blessed
