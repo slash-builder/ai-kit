@@ -21,9 +21,9 @@
 //!
 //! # Known limits
 //!
-//! Reproducibility: the starting noise comes from `seed` on every device, but the Euler-ancestral sampler draws more noise
-//! on later steps from Candle's own RNG, which can only be seeded on CUDA. With `steps = 1` (no extra noise) the same
-//! seed gives the same image everywhere. No img2img, inpainting or LoRA. One request at a time per model.
+//! Reproducibility: the starting noise comes from `seed` on every device. The Euler-ancestral sampler draws more noise on later
+//! steps from Candle's own RNG, which this backend seeds on CUDA (so a seed reproduces an image exactly there) but which cannot be seeded
+//! on the CPU. With `steps = 1` (no extra noise) the same seed gives the same image everywhere. No img2img, inpainting or LoRA. One request at a time per model.
 
 use crate::backends::candle::{check_vram, device_for, verify_model_files, DevicePreference};
 use crate::error::{AiKitError, Result};
@@ -190,6 +190,13 @@ impl CandleImageService {
         })?;
         let started = std::time::Instant::now();
         let seed = p.seed.unwrap_or_else(fresh_seed);
+        // The Euler-ancestral sampler draws fresh noise on every step but the last, from Candle's own RNG. That RNG can only be
+        // seeded on CUDA, so seed it there (on the CPU only `steps = 1`, which draws none, is reproducible).
+        if m.device.is_cuda() {
+            m.device.set_seed(seed).map_err(|e| AiKitError::Internal {
+                reason: format!("seeding the GPU RNG: {e}"),
+            })?;
+        }
         let internal = |what: &str, e: candle_core::Error| AiKitError::Internal {
             reason: format!("{what}: {e}"),
         };

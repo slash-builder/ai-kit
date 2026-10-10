@@ -229,6 +229,22 @@ async fn a_real_image_is_a_real_png_of_the_requested_size_and_is_reproducible() 
     assert_eq!(a.png, b.png, "same seed, one step: not reproducible");
     let c = get(svc.handle(mk(12)).await.unwrap());
     assert_ne!(a.png, c.png, "different seeds gave the same image");
+
+    // On CUDA the sampler's per-step noise is seeded too, so even a multi-step image is reproducible there.
+    if matches!(device(), DevicePreference::Cuda(_)) {
+        let multi = |seed: u64| {
+            let mut p = ImageGenParams::new("sd-turbo", "a red apple on a wooden table, photo");
+            p.steps = 3;
+            p.seed = Some(seed);
+            Request::ImageGeneration(p)
+        };
+        let x = get(svc.handle(multi(5)).await.unwrap());
+        let y = get(svc.handle(multi(5)).await.unwrap());
+        assert_eq!(
+            x.png, y.png,
+            "3 steps, same seed, on CUDA: not reproducible"
+        );
+    }
 }
 
 #[tokio::test]

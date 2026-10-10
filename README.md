@@ -199,7 +199,7 @@ ai-kit-cli route   --catalog catalog.yaml --batch mixed.jsonl --local-model llam
 **Read before relying on it.**
 - **Licence:** the dev image weights (`stabilityai/sd-turbo`) are under Stability AI's non-commercial research licence. A product needs a commercially licensed model. Candle 0.11 cannot run the studio's Z-Image-Turbo (Apache-2.0) on a 12 GB card (no quantised loader, no offload).
 - Image quality is that of a small distilled model: coherent, but it follows prompts loosely ("dusk" came out as daylight).
-- Reproducibility: the seed fixes the starting noise on every device; later sampler steps use Candle's RNG, which only CUDA can seed, so use `steps = 1` when you need identical images everywhere.
+- Reproducibility: the seed fixes the starting noise on every device and also seeds the sampler's per-step noise on CUDA, so a seed reproduces an image exactly on the GPU. Candle's CPU RNG cannot be seeded, so on the CPU only `steps = 1` (no per-step noise) is exactly reproducible.
 - No img2img, inpainting, LoRA or batching. No audio or vision backend yet (the contract and the honest errors are in place). Output sanity checks (`OutputCheck::Sane`) catch blank or wrong-size images and malformed embeddings, not poor quality.
 - The cloud tier for non-text capabilities is empty; adding one is a `CapabilityService` implementation.
 
