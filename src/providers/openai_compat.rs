@@ -16,7 +16,7 @@
 //! Not in this slice: streaming, tool calls, images, structured output, capacity probing (`/api/ps`). Tested against wiremock; one
 //! `#[ignore]` test runs against a real local Ollama.
 
-use crate::budget::{Ledger, Pricing, Usage};
+use crate::budget::Usage;
 use crate::credentials::CredentialSource;
 use crate::egress::{Locality, ProviderInfo};
 use crate::modality::{EmbeddingResponse, Output, Request, RequestKind};
@@ -30,37 +30,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Why an adapter could not be built.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ConfigError {
-    /// `Locality::Device` but the base URL is not a loopback address.
-    DeviceMustBeLoopback,
-    /// `Locality::Home` but the host is a public address.
-    HomeMustBePrivate,
-    /// `Locality::Saas` needs a credential name and a budget.
-    SaasNeedsCredentialAndBudget,
-    /// A credential name was configured but cannot be loaded now.
-    CredentialUnavailable,
-    BadUrl,
-    HttpClient,
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            ConfigError::DeviceMustBeLoopback => "a Device provider must be on a loopback address",
-            ConfigError::HomeMustBePrivate => "a Home provider must be on a private address",
-            ConfigError::SaasNeedsCredentialAndBudget => {
-                "a SaaS provider needs a credential name and a budget"
-            }
-            ConfigError::CredentialUnavailable => "the configured credential cannot be loaded",
-            ConfigError::BadUrl => "the base URL is not valid",
-            ConfigError::HttpClient => "the HTTP client could not be built",
-        })
-    }
-}
-impl std::error::Error for ConfigError {}
+pub use super::{Budget, ConfigError};
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatConfig {
@@ -92,12 +62,6 @@ impl OpenAiCompatConfig {
             timeout: Duration::from_secs(300),
         }
     }
-}
-
-/// The spend guard a SaaS adapter must carry.
-pub struct Budget {
-    pub ledger: Arc<Ledger>,
-    pub pricing: Pricing,
 }
 
 pub struct OpenAiCompatAdapter {
@@ -493,6 +457,7 @@ impl ProviderAdapter for OpenAiCompatAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budget::{Ledger, Pricing};
     use crate::credentials::InMemoryCredentials;
     use crate::egress::{AgeBand, Label, Policy, Purpose, SourceKind, Subject, VecSink};
     use crate::modality::EmbeddingParams;
