@@ -87,7 +87,14 @@ default = []
 # (Jenkinsfile: cargo test / fmt / clippy / build --release, no flags)
 # untouched, since it pulls a real ML toolchain + requires `make fetch-model`
 # to have downloaded weights for anything beyond `cargo build` to be useful.
-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:png"]
+candle = ["text", "image", "embedding"]
+
+# The Candle backends are split by request kind so a build can leave kinds out (`candle` above is the umbrella, unchanged in
+# meaning). `candle-base` is the shared machinery (device choice, VRAM check, BLAKE3 file verification) and the Candle deps.
+candle-base = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+text = ["candle-base"]
+embedding = ["candle-base"]
+image = ["candle-base", "dep:png"]
 
 # NVIDIA GPU inference through Candle's CUDA backend. Implies `candle`. Off by
 # default and NOT part of CI (Jenkinsfile): it needs nvcc + the CUDA runtime

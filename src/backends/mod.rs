@@ -11,28 +11,26 @@
 //!   module's doc comment for the decision-memo #2/#9 open-ruling caveat
 //!   before using this beyond a dev POC.
 
-#[cfg(feature = "candle")]
+#[cfg(feature = "text")]
 pub mod candle;
-#[cfg(feature = "candle")]
+#[cfg(feature = "candle-base")]
 pub mod common;
-
-#[cfg(feature = "candle")]
-pub use candle::CandleInferenceService;
-#[cfg(feature = "candle")]
-pub use common::{describe_cuda_devices, DevicePreference};
-
-#[cfg(feature = "candle")]
+#[cfg(feature = "image")]
 pub mod diffusion;
-#[cfg(feature = "candle")]
+#[cfg(feature = "embedding")]
 pub mod embedding;
-#[cfg(feature = "candle")]
+#[cfg(feature = "image")]
 pub(crate) mod zimage;
-#[cfg(feature = "candle")]
+#[cfg(feature = "image")]
 pub(crate) mod zimage_text;
 
-#[cfg(feature = "candle")]
+#[cfg(feature = "text")]
+pub use candle::CandleInferenceService;
+#[cfg(feature = "candle-base")]
+pub use common::{describe_cuda_devices, DevicePreference};
+#[cfg(feature = "image")]
 pub use diffusion::CandleImageService;
-#[cfg(feature = "candle")]
+#[cfg(feature = "embedding")]
 pub use embedding::CandleEmbeddingService;
 
 #[cfg(feature = "claude-proxy")]

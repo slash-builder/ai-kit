@@ -65,6 +65,7 @@ pub(crate) fn device_for(pref: DevicePreference) -> std::result::Result<(Device,
     }
 }
 
+#[cfg_attr(not(any(feature = "image", feature = "embedding")), allow(dead_code))]
 /// BLAKE3 of a file, streamed (model files can be gigabytes).
 pub(crate) fn hash_file(path: &str) -> Result<String> {
     let mut h = blake3::Hasher::new();
@@ -72,6 +73,7 @@ pub(crate) fn hash_file(path: &str) -> Result<String> {
     Ok(h.finalize().to_hex().to_string())
 }
 
+#[cfg_attr(not(any(feature = "image", feature = "embedding")), allow(dead_code))]
 /// Verify the main file and every extra file of a model against the catalog's hashes. Returns the main file's path.
 pub(crate) fn verify_model_files(model: &ModelMetadata) -> Result<String> {
     let strip = |l: &str| l.strip_prefix("file://").unwrap_or(l).to_string();
@@ -211,6 +213,7 @@ pub fn describe_cuda_devices() -> Vec<String> {
     }
 }
 
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
 /// True if an error message is a GPU out-of-memory (Candle surfaces it as text, e.g. `CUDA_ERROR_OUT_OF_MEMORY`).
 pub(crate) fn looks_like_oom(text: &str) -> bool {
     let t = text.to_ascii_uppercase();
@@ -219,6 +222,7 @@ pub(crate) fn looks_like_oom(text: &str) -> bool {
 
 /// Free GPU memory in MB, if `device` is a CUDA device that can be queried.
 #[cfg(feature = "cuda")]
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
 fn free_vram_mb(device: &Device) -> Option<u64> {
     let ctx = device
         .as_cuda_device()
@@ -229,10 +233,12 @@ fn free_vram_mb(device: &Device) -> Option<u64> {
     ctx.mem_get_info().ok().map(|(free, _)| (free >> 20) as u64)
 }
 #[cfg(not(feature = "cuda"))]
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
 fn free_vram_mb(_device: &Device) -> Option<u64> {
     None
 }
 
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
 /// Turn an `Internal` error that is really a GPU out-of-memory into a typed `InferenceOom`, so callers and the wire contract can tell
 /// "does not fit" from "broken". `required_mb` is 0 because the real need is not known at that point; `available_mb` is the free
 /// memory right now when it can be read. Any other error is returned unchanged.

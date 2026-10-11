@@ -60,7 +60,7 @@
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 
-#[cfg(any(feature = "candle", feature = "claude-proxy"))]
+#[cfg(any(feature = "candle-base", feature = "claude-proxy"))]
 pub mod backends;
 pub mod cache;
 pub mod error;
@@ -72,11 +72,14 @@ pub mod service;
 pub mod types;
 
 // Re-export key types at crate root
-#[cfg(feature = "candle")]
-pub use backends::{
-    describe_cuda_devices, CandleEmbeddingService, CandleImageService, CandleInferenceService,
-    DevicePreference,
-};
+#[cfg(feature = "embedding")]
+pub use backends::CandleEmbeddingService;
+#[cfg(feature = "image")]
+pub use backends::CandleImageService;
+#[cfg(feature = "text")]
+pub use backends::CandleInferenceService;
+#[cfg(feature = "candle-base")]
+pub use backends::{describe_cuda_devices, DevicePreference};
 #[cfg(feature = "claude-proxy")]
 pub use backends::{ClaudeProxyConfig, ClaudeProxyInferenceService};
 pub use error::{AiKitError, Result};
