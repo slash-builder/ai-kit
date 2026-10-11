@@ -64,6 +64,8 @@ pub enum ProviderError {
     ContextOverflow,
     /// A spend limit was reached (non-retryable on the same provider).
     BudgetExceeded,
+    /// The server does not have the requested model (a local server that has not pulled it, a retired id).
+    ModelNotFound,
     Other,
 }
 
@@ -79,6 +81,7 @@ impl ProviderError {
             ProviderError::Unavailable => "unavailable",
             ProviderError::ContextOverflow => "context_overflow",
             ProviderError::BudgetExceeded => "budget_exceeded",
+            ProviderError::ModelNotFound => "model_not_found",
             ProviderError::Other => "other",
         }
     }

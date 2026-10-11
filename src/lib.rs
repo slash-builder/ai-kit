@@ -71,7 +71,7 @@ pub mod hybrid;
 pub mod modality;
 pub mod model_card;
 pub mod provider;
-#[cfg(feature = "provider-anthropic")]
+#[cfg(any(feature = "provider-anthropic", feature = "provider-openai-compat"))]
 pub mod providers;
 pub mod registry;
 pub mod routed;
