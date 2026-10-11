@@ -798,6 +798,13 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
         }
     }
     if let Some(m) = flag_value(args, "--image-model") {
+        let m = match resolve_model(Some(m), RequestKind::ImageGeneration, &catalog_path, args) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        };
         match CandleImageService::new(&catalog_path, device) {
             Ok(svc) => local.push(TierBackend::new(
                 Arc::new(svc),
@@ -903,18 +910,52 @@ fn cmd_embed(_args: &[String]) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// Resolve a model flag: a concrete id is used as is; `default` (or no flag, where allowed) picks the catalog's default for
+/// `kind` by the registry's rule: never a non-commercial model unless `--allow-noncommercial` is given.
+#[cfg(feature = "candle")]
+fn resolve_model(
+    given: Option<String>,
+    kind: ai_kit::RequestKind,
+    catalog_path: &str,
+    args: &[String],
+) -> Result<String, String> {
+    if let Some(id) = given.filter(|g| g != "default") {
+        return Ok(id);
+    }
+    let reg = ai_kit::registry::ModelRegistry::load_from_file(catalog_path)
+        .map_err(|e| format!("failed to load catalog {catalog_path}: {e}"))?;
+    let allow = args.iter().any(|a| a == "--allow-noncommercial");
+    reg.default_for(kind, allow).map(|m| m.id.clone()).ok_or_else(|| {
+        format!(
+            "no commercially usable {} model in {catalog_path} (pass --allow-noncommercial to use a development-only model)",
+            kind.as_str()
+        )
+    })
+}
+
 #[cfg(feature = "candle")]
 fn cmd_imagine(args: &[String]) -> ExitCode {
     use ai_kit::{CandleImageService, ImageGenParams, Output, Request, RequestService};
-    let (Some(model), Some(prompt), Some(out)) = (
-        flag_value(args, "--model"),
-        flag_value(args, "--prompt"),
-        flag_value(args, "--out"),
-    ) else {
-        eprintln!("error: imagine needs --model, --prompt and --out");
+    let (Some(prompt), Some(out)) = (flag_value(args, "--prompt"), flag_value(args, "--out"))
+    else {
+        eprintln!(
+            "error: imagine needs --prompt and --out (and --model, or the catalog's default)"
+        );
         return ExitCode::from(2);
     };
     let catalog_path = flag_value(args, "--catalog").unwrap_or_else(default_catalog_path);
+    let model = match resolve_model(
+        flag_value(args, "--model"),
+        ai_kit::RequestKind::ImageGeneration,
+        &catalog_path,
+        args,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let svc = match CandleImageService::new(&catalog_path, device_flag(args)) {
         Ok(s) => s,
         Err(e) => {

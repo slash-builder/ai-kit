@@ -343,3 +343,36 @@ async fn one_service_routes_every_kind_of_request_and_is_honest_about_the_rest()
         "no text backend is configured: {e:?}"
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn z_image_turbo_makes_a_real_reproducible_image_through_the_service() {
+    // Needs a catalog with `z-image-turbo` (architecture: z_image) and a CUDA device with ~9 GB free.
+    let svc = CandleImageService::new(&real_catalog(), device()).unwrap();
+    let mk = |seed: u64| {
+        let mut p = ImageGenParams::new(
+            "z-image-turbo",
+            "a lighthouse on a cliff at night, watercolor",
+        );
+        p.steps = 8;
+        p.seed = Some(seed);
+        Request::ImageGeneration(p)
+    };
+    let get = |o: Output| match o {
+        Output::Image(i) => i,
+        other => panic!("{other:?}"),
+    };
+    let a = get(svc.handle(mk(21)).await.unwrap());
+    assert_eq!(ai_kit::modality::png_dims(&a.png), Some((512, 512)));
+    assert!(a.pixel_stddev > 20.0, "flat image: {}", a.pixel_stddev);
+    assert!(OutputCheck::Sane
+        .check(&mk(21), &Output::Image(a.clone()))
+        .unwrap());
+    let b = get(svc.handle(mk(21)).await.unwrap());
+    assert_eq!(
+        a.png, b.png,
+        "same seed: not reproducible (Z-Image uses no sampler noise, so it must be)"
+    );
+    let c = get(svc.handle(mk(22)).await.unwrap());
+    assert_ne!(a.png, c.png, "different seeds gave the same image");
+}

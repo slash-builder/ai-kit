@@ -37,9 +37,7 @@ use candle_transformers::models::z_image::transformer::{
     patchify, unpatchify, Config as DitConfig, FinalLayer, RopeEmbedder, TimestepEmbedder,
     ZImageTransformerBlock, ADALN_EMBED_DIM, SEQ_MULTI_OF,
 };
-use candle_transformers::models::z_image::{
-    AutoEncoderKL, TextEncoderConfig, VaeConfig, ZImageTextEncoder,
-};
+use candle_transformers::models::z_image::{AutoEncoderKL, VaeConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
@@ -139,15 +137,38 @@ impl ZImagePipeline {
         format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
     }
 
-    /// `(1, tokens, 2560)` hidden states of the second-to-last layer, unpadded (diffusers keeps only the valid tokens).
-    pub(crate) fn encode_prompt(&self, prompt: &str) -> Result<Tensor> {
+    /// Token ids of the chat-templated prompt (diffusers keeps only the valid tokens, truncated to 512).
+    fn prompt_ids(&self, prompt: &str) -> Result<Vec<u32>> {
         let tok =
             Tokenizer::from_file(&self.files.tokenizer).map_err(|e| internal("tokenizer", e))?;
         let enc = tok
             .encode(Self::chat_prompt(prompt), false)
             .map_err(|e| internal("tokenize", e))?;
         let mut ids = enc.get_ids().to_vec();
-        ids.truncate(512); // diffusers' max_sequence_length
+        ids.truncate(512);
+        Ok(ids)
+    }
+
+    /// `(1, tokens, 2560)` hidden states of the second-to-last layer, unpadded. Streams the encoder one layer at a time,
+    /// so this phase needs well under 1 GB of GPU memory instead of the encoder's 8 GB.
+    pub(crate) fn encode_prompt(&self, prompt: &str) -> Result<Tensor> {
+        let ids = self.prompt_ids(prompt)?;
+        let paths: Vec<&str> = self
+            .files
+            .text_encoder_shards
+            .iter()
+            .map(String::as_str)
+            .collect();
+        crate::backends::zimage_text::encode_streaming(&ids, &paths, &self.device, self.dtype)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| internal("text encoder", e))
+    }
+
+    /// Reference path: Candle's own encoder with every layer resident (8 GB). Used only to check the streaming one.
+    #[cfg(test)]
+    fn encode_prompt_resident(&self, prompt: &str) -> Result<Tensor> {
+        use candle_transformers::models::z_image::{TextEncoderConfig, ZImageTextEncoder};
+        let ids = self.prompt_ids(prompt)?;
         let input = Tensor::new(ids.as_slice(), &self.device)
             .and_then(|t| t.unsqueeze(0))
             .map_err(|e| internal("ids", e))?;
@@ -157,19 +178,14 @@ impl ZImagePipeline {
             .iter()
             .map(String::as_str)
             .collect();
-        // SAFETY: the shards were BLAKE3-verified immediately before and are not modified while mapped.
+        // SAFETY: verified before; not modified while mapped.
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&paths, self.dtype, &self.device) }
             .map_err(|e| internal("text encoder weights", e))?;
         let te = ZImageTextEncoder::new(&TextEncoderConfig::z_image(), vb)
             .map_err(|e| internal("text encoder", e))?;
-        let out = te
-            .forward(&input)
-            .map_err(|e| internal("text encoder forward", e))?;
-        // Materialise before the encoder (8 GB) is dropped.
-        let out = out.contiguous().map_err(|e| internal("text", e))?;
-        self.device.synchronize().map_err(|e| internal("sync", e))?;
-        drop(te);
-        Ok(out)
+        te.forward(&input)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| internal("text encoder forward", e))
     }
 
     // ------------------------------------------------------------------ phase 2: denoise
@@ -268,32 +284,123 @@ impl ZImagePipeline {
         }
         .map_err(|e| internal("vae weights", e))?;
         let vae = AutoEncoderKL::new(&VaeConfig::z_image(), vb).map_err(|e| internal("vae", e))?;
-        let img = vae
-            .decode(
-                &latents
-                    .to_dtype(self.dtype)
-                    .map_err(|e| internal("vae in", e))?,
-            )
-            .map_err(|e| internal("vae decode", e))?;
-        // [-1, 1] -> [0, 255]
-        let img = img
-            .to_dtype(DType::F32)
-            .and_then(|i| (i.clamp(-1f32, 1f32)? + 1.0)? * 127.5)
-            .and_then(|i| i.to_dtype(DType::U8))
-            .and_then(|i| i.to_device(&Device::Cpu))
-            .and_then(|i| i.i(0)?.permute((1, 2, 0))?.contiguous())
-            .map_err(|e| internal("pixels", e))?;
-        img.flatten_all()
-            .and_then(|f| f.to_vec1::<u8>())
-            .map_err(|e| internal("pixels", e))
+        let (lh, lw) = (
+            latents.dim(2).map_err(|e| internal("latents", e))?,
+            latents.dim(3).map_err(|e| internal("latents", e))?,
+        );
+        let latents = latents
+            .to_dtype(self.dtype)
+            .map_err(|e| internal("vae in", e))?;
+        // CHW f32 in [-1, 1]
+        let chw: Vec<f32> = if lh * lw > TILE_ABOVE_LATENT_AREA {
+            self.decode_tiled(&vae, &latents, TILE_LATENT, TILE_OVERLAP_LATENT)?
+        } else {
+            vae.decode(&latents)
+                .and_then(|i| {
+                    i.to_dtype(DType::F32)?
+                        .to_device(&Device::Cpu)?
+                        .flatten_all()?
+                        .to_vec1::<f32>()
+                })
+                .map_err(|e| internal("vae decode", e))?
+        };
+        let (h, w) = (lh * 8, lw * 8);
+        let plane = h * w;
+        let mut out = vec![0u8; 3 * plane];
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let v = (chw[c * plane + y * w + x].clamp(-1.0, 1.0) + 1.0) * 127.5;
+                    out[(y * w + x) * 3 + c] = v as u8; // truncates, as Candle's F32->U8 cast does
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Decode in overlapping tiles blended with linear ramps, so memory does not grow with image size (a 1024x1024 decode in one
+    /// piece ran the 12 GB card out of memory). Returns CHW f32.
+    fn decode_tiled(
+        &self,
+        vae: &AutoEncoderKL,
+        latents: &Tensor,
+        tile: usize,
+        overlap: usize,
+    ) -> Result<Vec<f32>> {
+        let (lh, lw) = (
+            latents.dim(2).map_err(|e| internal("tile", e))?,
+            latents.dim(3).map_err(|e| internal("tile", e))?,
+        );
+        let (h, w) = (lh * 8, lw * 8);
+        let stride = tile - overlap;
+        let starts = |n: usize| -> Vec<usize> {
+            let mut s = vec![0];
+            while s.last().copied().unwrap_or(0) + tile < n {
+                let next = (s.last().copied().unwrap_or(0) + stride).min(n - tile);
+                s.push(next);
+            }
+            s
+        };
+        let mut acc = vec![0f32; 3 * h * w];
+        let mut wsum = vec![0f32; h * w];
+        for &ty in &starts(lh) {
+            for &tx in &starts(lw) {
+                let (th, tw) = (tile.min(lh), tile.min(lw));
+                let piece = latents
+                    .narrow(2, ty, th)
+                    .and_then(|t| t.narrow(3, tx, tw))
+                    .and_then(|t| t.contiguous())
+                    .map_err(|e| internal("tile", e))?;
+                let img = vae
+                    .decode(&piece)
+                    .and_then(|i| {
+                        i.to_dtype(DType::F32)?
+                            .to_device(&Device::Cpu)?
+                            .flatten_all()?
+                            .to_vec1::<f32>()
+                    })
+                    .map_err(|e| internal("vae decode (tile)", e))?;
+                let (ph, pw) = (th * 8, tw * 8);
+                let ramp = |i: usize, n: usize, at_start: bool, at_end: bool| -> f32 {
+                    let o = (overlap * 8) as f32;
+                    let from_start = if at_start {
+                        f32::MAX
+                    } else {
+                        (i + 1) as f32 / o
+                    };
+                    let from_end = if at_end { f32::MAX } else { (n - i) as f32 / o };
+                    from_start.min(from_end).min(1.0)
+                };
+                for y in 0..ph {
+                    let wy = ramp(y, ph, ty == 0, ty + th >= lh);
+                    for x in 0..pw {
+                        let wt = wy * ramp(x, pw, tx == 0, tx + tw >= lw);
+                        let (gy, gx) = (ty * 8 + y, tx * 8 + x);
+                        wsum[gy * w + gx] += wt;
+                        for c in 0..3 {
+                            acc[c * h * w + gy * w + gx] += wt * img[c * ph * pw + y * pw + x];
+                        }
+                    }
+                }
+            }
+        }
+        for c in 0..3 {
+            for i in 0..h * w {
+                acc[c * h * w + i] /= wsum[i].max(1e-6);
+            }
+        }
+        Ok(acc)
     }
 }
 
-use candle_core::IndexOp;
+/// Latent area (h*w) above which the VAE decodes in tiles. 96x96 latent = 768x768 px, which fits in one piece.
+const TILE_ABOVE_LATENT_AREA: usize = 96 * 96;
+const TILE_LATENT: usize = 64;
+const TILE_OVERLAP_LATENT: usize = 16;
 
 // ---------------------------------------------------------------------- the streaming transformer
 
-/// A GGUF tensor on the device: quantized (dequantized on use) or already dense.
+/// A GGUF tensor: K-quantized on the device (dequantized on use), or dense bf16/f32 in host RAM (uploaded on use).
 enum Weight {
     Quant(Arc<QTensor>),
     Dense(Tensor),
@@ -325,7 +432,6 @@ impl Weights {
                         .map_err(|e| internal(&format!("read {name}"), e))?;
                     Weight::Dense(
                         qt.dequantize(&Device::Cpu)
-                            .and_then(|t| t.to_device(device))
                             .and_then(|t| t.to_dtype(dtype))
                             .map_err(|e| internal(&format!("convert {name}"), e))?,
                     )
@@ -351,7 +457,8 @@ impl Weights {
     fn dequant(&self, w: &Weight) -> candle_core::Result<Tensor> {
         match w {
             Weight::Quant(q) => q.dequantize(&self.device)?.to_dtype(self.dtype),
-            Weight::Dense(t) => Ok(t.clone()),
+            // dense tensors live in host RAM (the refiner blocks are 1.6 GB of bf16) and are uploaded when used
+            Weight::Dense(t) => t.to_device(&self.device),
         }
     }
 
@@ -616,6 +723,31 @@ mod tests {
         assert!((s[8] - 0.272_727_272_7).abs() < 1e-9, "{}", s[8]);
         assert_eq!(s[9], 0.0);
         assert!(s.windows(2).all(|w| w[0] > w[1]), "strictly decreasing");
+    }
+
+    #[test]
+    fn dimensions_that_are_not_multiples_of_16_are_rejected_before_any_weight_is_read() {
+        let mut p = ImageGenParams::new("z-image-turbo", "x");
+        p.width = 520;
+        assert!(matches!(
+            ZImagePipeline::validate(&p),
+            Err(AiKitError::InvalidParams { .. })
+        ));
+        p.width = 512;
+        assert!(ZImagePipeline::validate(&p).is_ok());
+    }
+
+    #[test]
+    fn grid_positions_follow_diffusers_with_pad_rows_at_the_origin() {
+        let g = grid_with_pad((1, 2, 2), (5, 0, 0), 2, &Device::Cpu).unwrap();
+        assert_eq!(g.dims(), &[6, 3]);
+        let v = g.flatten_all().unwrap().to_vec1::<u32>().unwrap();
+        assert_eq!(&v[..12], &[5, 0, 0, 5, 0, 1, 5, 1, 0, 5, 1, 1]);
+        assert_eq!(
+            &v[12..],
+            &[0, 0, 0, 0, 0, 0],
+            "pad rows sit at (0,0,0), not continuing the grid"
+        );
     }
 
     #[test]
@@ -938,6 +1070,99 @@ mod tests {
             rel_err(&bf16, &py),
             rel_err(&f32_, &py)
         );
+    }
+
+    /// The layer-streaming encoder must equal Candle's resident one (same maths, same weights).
+    #[test]
+    #[ignore = "needs the Z-Image weights and a CUDA device with ~9 GB free"]
+    fn streaming_matches_candles_full_encoder() {
+        let native = env("AI_KIT_ZIMAGE_NATIVE");
+        let device =
+            crate::backends::common::device_for(crate::backends::common::DevicePreference::Cuda(0))
+                .unwrap()
+                .0;
+        let te = ["00001", "00002", "00003"]
+            .map(|n| format!("{native}/text_encoder/model-{n}-of-00003.safetensors"));
+        let pipe = ZImagePipeline::new(
+            ZImageFiles {
+                gguf: String::new(),
+                text_encoder_shards: te.to_vec(),
+                vae: String::new(),
+                tokenizer: format!("{native}/tokenizer/tokenizer.json"),
+            },
+            device,
+        );
+        for prompt in ["a cozy cottage at dusk, watercolor", "a very long description of a market square with many vendors, banners, lanterns, fruit stalls and a fountain in the middle, golden hour, photographed on film"] {
+            let a = pipe.encode_prompt(prompt).unwrap().to_device(&Device::Cpu).unwrap();
+            let b = pipe.encode_prompt_resident(prompt).unwrap().to_device(&Device::Cpu).unwrap();
+            let e = rel_err(&a, &b);
+            println!("{} tokens: streaming vs resident rel err {e:.2e}", a.dim(1).unwrap());
+            assert!(e < 8e-3, "streaming encoder differs from Candle's (bf16 rounding is ~3e-3): {e}");
+        }
+    }
+
+    /// Tiled VAE decoding must agree with the single-pass decode (no seams, no blending bug).
+    #[test]
+    #[ignore = "needs the Z-Image weights, a diffusers reference dump and a CUDA device"]
+    fn tiled_vae_decode_matches_the_single_pass() {
+        let native = env("AI_KIT_ZIMAGE_NATIVE");
+        let device =
+            crate::backends::common::device_for(crate::backends::common::DevicePreference::Cuda(0))
+                .unwrap()
+                .0;
+        let pipe = ZImagePipeline::new(
+            ZImageFiles {
+                gguf: String::new(),
+                text_encoder_shards: vec![],
+                vae: format!("{native}/vae/diffusion_pytorch_model.safetensors"),
+                tokenizer: String::new(),
+            },
+            device.clone(),
+        );
+        let r = candle_core::safetensors::load(
+            format!("{}/ref.safetensors", env("AI_KIT_ZIMAGE_REF")),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let lat = r["latents_after_step_8"]
+            .to_device(&device)
+            .unwrap()
+            .to_dtype(pipe.dtype)
+            .unwrap(); // 1x16x64x64
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[pipe.files.vae.as_str()], pipe.dtype, &device)
+        }
+        .unwrap();
+        let vae = AutoEncoderKL::new(&VaeConfig::z_image(), vb).unwrap();
+        let whole = vae
+            .decode(&lat)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        // 64x64 latent in 32-wide tiles with 8 overlap: 3x3 tiles, interior blending on every edge
+        let tiled = pipe.decode_tiled(&vae, &lat, 32, 8).unwrap();
+        assert_eq!(whole.len(), tiled.len());
+        let mad = whole
+            .iter()
+            .zip(&tiled)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f32>()
+            / whole.len() as f32
+            * 127.5;
+        let max = whole
+            .iter()
+            .zip(&tiled)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max)
+            * 127.5;
+        println!("tiled vs single-pass decode: mean abs diff {mad:.2} / 255, max {max:.1}");
+        assert!(mad < 2.0, "tiled decode differs from single pass: {mad}");
     }
 
     fn image_from_rgb(rgb: &[u8]) -> Vec<u8> {

@@ -182,7 +182,7 @@ impl MultiHybridService {
         tier: Tier,
         req: &Request,
         check: &OutputCheck,
-    ) -> (Attempt, Option<Output>) {
+    ) -> (Attempt, Option<Output>, Option<AiKitError>) {
         let cap = req.kind();
         let set = if tier == Tier::Local {
             &self.local
@@ -201,6 +201,10 @@ impl MultiHybridService {
                     error: Some(format!("no {tier:?} backend for {}", cap.as_str())),
                 },
                 None,
+                Some(unsupported(
+                    cap,
+                    format!("no {tier:?} backend for {}", cap.as_str()),
+                )),
             );
         };
         let model = backend.model_ids[&cap].clone();
@@ -241,6 +245,7 @@ impl MultiHybridService {
                         error: None,
                     },
                     Some(out),
+                    None,
                 )
             }
             Err(e) => (
@@ -254,6 +259,7 @@ impl MultiHybridService {
                     error: Some(e.to_string()),
                 },
                 None,
+                Some(e),
             ),
         }
     }
@@ -309,7 +315,7 @@ impl MultiHybridService {
         let private = r.privacy == Privacy::Private;
         let cloud_ok = self.cloud.has(cap) && !private;
 
-        let (a1, o1) = self.call(first, &req, &r.check).await;
+        let (a1, o1, e1) = self.call(first, &req, &r.check).await;
         let failed1 = o1.is_none() || a1.verified == Some(false);
         trace.attempts.push(a1);
 
@@ -340,12 +346,10 @@ impl MultiHybridService {
                             "local call failed; no cloud fallback (privacy=private)",
                         );
                     }
-                    let err = trace
-                        .attempts
-                        .last()
-                        .and_then(|a| a.error.clone())
-                        .unwrap_or_else(|| "request failed".into());
-                    Err(AiKitError::Internal { reason: err })
+                    // Keep the typed error (an `InferenceOom` must stay one, so callers and the wire contract can tell it apart).
+                    Err(e1.unwrap_or_else(|| AiKitError::Internal {
+                        reason: "request failed".into(),
+                    }))
                 }
             };
         }
@@ -358,7 +362,7 @@ impl MultiHybridService {
         } else {
             "local answer failed verification; escalating to the cloud".into()
         });
-        let (a2, o2) = self.call(Tier::Cloud, &req, &r.check).await;
+        let (a2, o2, _e2) = self.call(Tier::Cloud, &req, &r.check).await;
         let err2 = a2.error.clone();
         trace.attempts.push(a2);
         match (o2, o1) {
@@ -458,8 +462,10 @@ mod tests {
         async fn handle(&self, req: Request) -> Result<Output> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fail {
-                return Err(AiKitError::Internal {
-                    reason: "boom".into(),
+                return Err(AiKitError::InferenceOom {
+                    model_id: "model".into(),
+                    required_mb: 8800,
+                    available_mb: 7600,
                 });
             }
             let sid = SessionId::default();
@@ -740,6 +746,28 @@ mod tests {
         assert_eq!(
             s.kinds(),
             (vec![TextGeneration, Embedding], vec![TextGeneration])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_out_of_memory_error_keeps_its_type_through_the_router() {
+        let local = Mock::failing(&[ImageGeneration]);
+        let s = MultiHybridService::new(
+            vec![tier(&local, &[ImageGeneration])],
+            vec![],
+            RoutePolicy::local_first(),
+        );
+        let e = s
+            .handle_routed(RoutedRequest::new(Request::ImageGeneration(
+                crate::modality::ImageGenParams::new("m", "a cat"),
+            )))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, AiKitError::InferenceOom { .. }), "{e:?}");
+        assert_eq!(
+            e.to_inference_error_code(),
+            crate::error::InferenceErrorCode::Oom,
+            "the wire code must say out of memory, not internal"
         );
     }
 }

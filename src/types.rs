@@ -136,7 +136,38 @@ pub struct ModelFile {
     pub size_bytes: u64,
 }
 
+/// What a model's licence allows, from `metadata.custom["license"]`. Only used to keep non-commercial models from becoming a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LicenceClass {
+    /// Permits commercial use (for example Apache-2.0, MIT).
+    Commercial,
+    /// Development or research only (`non-commercial...`, `research...`).
+    NonCommercial,
+    /// Not stated. Treated as usable; a catalog author who knows better must say so.
+    Unknown,
+}
+
 impl ModelMetadata {
+    /// Commercial / non-commercial / unknown, from `custom.license`.
+    pub fn licence_class(&self) -> LicenceClass {
+        match self
+            .metadata
+            .custom
+            .get("license")
+            .map(|l| l.trim().to_ascii_lowercase())
+        {
+            None => LicenceClass::Unknown,
+            Some(l)
+                if l.starts_with("non-commercial")
+                    || l.starts_with("noncommercial")
+                    || l.starts_with("research") =>
+            {
+                LicenceClass::NonCommercial
+            }
+            Some(_) => LicenceClass::Commercial,
+        }
+    }
+
     /// Which kind of work this model does (`metadata.custom["kind"]`; absent means text generation).
     pub fn kind(&self) -> crate::modality::RequestKind {
         self.metadata

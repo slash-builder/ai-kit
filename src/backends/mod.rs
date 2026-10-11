@@ -27,6 +27,8 @@ pub mod diffusion;
 pub mod embedding;
 #[cfg(feature = "candle")]
 pub(crate) mod zimage;
+#[cfg(feature = "candle")]
+pub(crate) mod zimage_text;
 
 #[cfg(feature = "candle")]
 pub use diffusion::CandleImageService;
