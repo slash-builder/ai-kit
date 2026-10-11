@@ -164,6 +164,20 @@ pub enum InferenceErrorCode {
     Internal = 15,
     /// A request exceeded a per-kind size limit (`{limit_name, limit}` belong in the details). Provisional.
     RequestTooLarge = 16,
+    // --- from the /inference mount review (2026-10-11); all provisional, numbers not ratified ---
+    /// The host is busy and the request cannot be queued. Callers see only "unavailable, retry later", never why
+    /// (the reason, e.g. a VR session or an owner at the desktop, is shown to the host's owner only).
+    HostBusy = 17,
+    /// No job has this id (for this caller). Different from [`InferenceErrorCode::JobExpired`].
+    JobUnknown = 18,
+    /// The job existed but its retention window has passed.
+    JobExpired = 19,
+    /// The model is known but not downloaded (a system-UI download, never an app message).
+    ModelNotInstalled = 20,
+    /// This user has not accepted the model's licence (acceptance is a system-UI action, per user).
+    LicenceNotAccepted = 21,
+    /// Nothing configured, credentialed and healthy can serve this request.
+    NoEligibleProvider = 22,
 }
 
 impl AiKitError {
