@@ -80,6 +80,10 @@ pub struct RoutedRequest {
     /// `Private` (the default) never reaches a cloud tier.
     pub privacy: Privacy,
     pub check: OutputCheck,
+    /// The request kinds the caller is **granted**, as decided at the Message Kit boundary (Score Kit grants). `None` means
+    /// no restriction (a trusted in-process caller). With `Some`, a request of a kind not in the set is refused with
+    /// `CapabilityDenied`, and free text is never re-typed into a kind that is not in the set.
+    pub granted: Option<Vec<RequestKind>>,
 }
 
 impl RoutedRequest {
@@ -89,7 +93,13 @@ impl RoutedRequest {
             class: None,
             privacy: Privacy::Private,
             check: OutputCheck::None,
+            granted: None,
         }
+    }
+    /// Restrict this request to the kinds the boundary granted (see [`RoutedRequest::granted`]).
+    pub fn with_granted(mut self, kinds: &[RequestKind]) -> Self {
+        self.granted = Some(kinds.to_vec());
+        self
     }
     pub fn shareable(mut self) -> Self {
         self.privacy = Privacy::Shareable;
@@ -116,11 +126,21 @@ impl MultiHybridService {
             cloud: TierSet { backends: cloud },
             router: Router::new(policy),
             stats: Mutex::new(RouteStats::default()),
-            retype_text: true,
+            retype_text: false,
         }
     }
 
-    /// Turn off treating image-like text prompts as image requests (they are then plain text requests).
+    /// Treat free text that is really an image request as one (opt-in).
+    ///
+    /// **Off by default.** Re-typing changes what runs: a caller who was only granted text could otherwise get image generation by
+    /// phrasing a prompt like an image request, bypassing a per-kind grant. When on, it only happens if the request's
+    /// [`granted`](RoutedRequest::granted) set (when present) includes image generation.
+    pub fn with_retyping(mut self) -> Self {
+        self.retype_text = true;
+        self
+    }
+
+    /// Turn off re-typing (the default).
     pub fn without_retyping(mut self) -> Self {
         self.retype_text = false;
         self
@@ -151,7 +171,11 @@ impl MultiHybridService {
             Request::Embedding(_) => TaskClass::Embedding,
             Request::SpeechToText(_) => TaskClass::SpeechToText,
         });
-        if self.retype_text && class == TaskClass::ImageRaster {
+        let image_allowed = r
+            .granted
+            .as_ref()
+            .is_none_or(|g| g.contains(&RequestKind::ImageGeneration));
+        if self.retype_text && image_allowed && class == TaskClass::ImageRaster {
             if let Request::Text(p) = &r.request {
                 return (
                     Request::ImageGeneration(ImageGenParams::new(String::new(), p.prompt.clone())),
@@ -275,6 +299,15 @@ impl MultiHybridService {
     pub async fn handle_routed(&self, r: RoutedRequest) -> Result<(Output, RouteTrace)> {
         if let Ok(mut s) = self.stats.lock() {
             s.requests += 1;
+        }
+        if let Some(g) = &r.granted {
+            if !g.contains(&r.request.kind()) {
+                return Err(AiKitError::CapabilityDenied {
+                    app_id: String::new(),
+                    model_id: String::new(),
+                    request_kind: r.request.kind().as_str().to_string(),
+                });
+            }
         }
         let (req, _class) = self.effective(&r);
         req.validate_for_route()?;
@@ -621,7 +654,8 @@ mod tests {
             vec![tier(&local, &[TextGeneration, ImageGeneration])],
             vec![],
             RoutePolicy::local_first(),
-        );
+        )
+        .with_retyping();
         let (out, trace) = s
             .handle_routed(RoutedRequest::new(text_req(
                 "a watercolor painting of a misty forest cottage",
@@ -768,6 +802,72 @@ mod tests {
             e.to_inference_error_code(),
             crate::error::InferenceErrorCode::Oom,
             "the wire code must say out of memory, not internal"
+        );
+    }
+
+    #[tokio::test]
+    async fn retyping_is_off_by_default_and_cannot_widen_a_grant() {
+        let prompt = "a watercolor painting of a misty forest cottage";
+        let local = Mock::new(&[TextGeneration, ImageGeneration]);
+        let mk = |retype: bool| {
+            let s = MultiHybridService::new(
+                vec![tier(&local, &[TextGeneration, ImageGeneration])],
+                vec![],
+                RoutePolicy::local_first(),
+            );
+            if retype {
+                s.with_retyping()
+            } else {
+                s
+            }
+        };
+        // default: image-looking text stays text
+        let (out, _) = mk(false)
+            .handle_routed(RoutedRequest::new(text_req(prompt)))
+            .await
+            .unwrap();
+        assert!(matches!(out, Output::Text(_)));
+        // retyping on, but the boundary granted text only: still text, the image backend is never reached
+        let (out, _) = mk(true)
+            .handle_routed(RoutedRequest::new(text_req(prompt)).with_granted(&[TextGeneration]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, Output::Text(_)),
+            "a text grant must not become image generation"
+        );
+        // retyping on and image granted too: it runs as an image
+        let (out, _) = mk(true)
+            .handle_routed(
+                RoutedRequest::new(text_req(prompt))
+                    .with_granted(&[TextGeneration, ImageGeneration]),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(out, Output::Image(_)));
+    }
+
+    #[tokio::test]
+    async fn a_kind_that_was_not_granted_is_refused_before_anything_runs() {
+        let local = Mock::new(&[TextGeneration, ImageGeneration]);
+        let s = MultiHybridService::new(
+            vec![tier(&local, &[TextGeneration, ImageGeneration])],
+            vec![],
+            RoutePolicy::local_first(),
+        );
+        let img = Request::ImageGeneration(crate::modality::ImageGenParams::new("m", "a cat"));
+        let e = s
+            .handle_routed(RoutedRequest::new(img).with_granted(&[TextGeneration]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, AiKitError::CapabilityDenied { request_kind, .. } if request_kind == "image_generation"),
+            "{e:?}"
+        );
+        assert_eq!(
+            local.calls(),
+            0,
+            "a refused request must not reach a backend"
         );
     }
 }

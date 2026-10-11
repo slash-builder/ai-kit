@@ -298,7 +298,7 @@ async fn one_service_routes_every_kind_of_request_and_is_honest_about_the_rest()
             &[(RequestKind::Embedding, "minilm")],
         ),
     ];
-    let svc = MultiHybridService::new(local, vec![], RoutePolicy::local_first());
+    let svc = MultiHybridService::new(local, vec![], RoutePolicy::local_first()).with_retyping();
     let (out, _) = svc
         .handle_routed(RoutedRequest::new(image_req("", 512)).with_check(OutputCheck::Sane))
         .await

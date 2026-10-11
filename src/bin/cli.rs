@@ -837,7 +837,11 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
             )]
         })
         .unwrap_or_default();
-    let svc = MultiHybridService::new(local, cloud, policy);
+    // The CLI is a trusted in-process caller (no boundary, so no grant set): free-text image requests may be re-typed.
+    let mut svc = MultiHybridService::new(local, cloud, policy);
+    if !args.iter().any(|a| a == "--no-retype") {
+        svc = svc.with_retyping();
+    }
 
     let routed = |job: &RouteJob| -> Result<RoutedRequest, String> {
         let mut r = RoutedRequest::new(job_request(job)?);

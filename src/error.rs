@@ -91,8 +91,13 @@ pub enum AiKitError {
     ///
     /// Note: Per decision memo #1, AI Kit trusts Hearth's capability check at call boundary.
     /// This error should only occur if Hearth fails to enforce the check (design violation).
-    #[error("RequestKind check failed for app {app_id} on model {model_id}")]
-    CapabilityDenied { app_id: String, model_id: String },
+    #[error("Request kind '{request_kind}' is not granted (app '{app_id}', model '{model_id}')")]
+    CapabilityDenied {
+        app_id: String,
+        model_id: String,
+        /// The request kind that was refused (`RequestKind::as_str()`), for the audit record.
+        request_kind: String,
+    },
 
     /// A remote proxy backend (e.g. the `claude-proxy` feature's Anthropic
     /// binding) failed: network/transport failure, a non-2xx HTTP response,
@@ -269,6 +274,7 @@ mod tests {
         let e = AiKitError::CapabilityDenied {
             app_id: "a".into(),
             model_id: "m".into(),
+            request_kind: "image_generation".into(),
         };
         assert_eq!(e.to_inference_error_code(), InferenceErrorCode::Internal);
     }
@@ -280,6 +286,7 @@ mod tests {
         let e = AiKitError::CapabilityDenied {
             app_id: "a".into(),
             model_id: "m".into(),
+            request_kind: "image_generation".into(),
         };
         assert_eq!(e.to_error_code(), 13);
     }
