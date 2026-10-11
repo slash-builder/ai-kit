@@ -581,7 +581,7 @@ impl HybridInferenceService {
         trace.attempts.push(a1);
 
         if let Some(r) = r1.as_ref() {
-            if !failed1 || !(first == Tier::Local && escalate) {
+            if !(failed1 && first == Tier::Local && escalate) {
                 if failed1 && private && first == Tier::Local && req.verifier.is_present() {
                     self.note_blocked(&mut trace, "local answer failed verification; not retried in the cloud (privacy=private)");
                 }
