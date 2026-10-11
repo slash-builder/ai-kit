@@ -7,11 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Candle 0.9.2 -> **0.11** (verified: KV isolation A/B/A on CPU and CUDA, real-weights multimodal tests).
+- `AiKitError::to_error_code()` is **deprecated**: its numbers (20-24, 13, 90) collide with the fabric `ErrorCode` space (a remote peer could trigger an ops alert). Use `to_inference_error_code()`.
+- The router keeps the original typed error when a call fails (an out-of-memory error used to become `Internal`).
+
 ### Added
-- Any kind of request: a general `Request`/`Output` contract for five capabilities (text, image generation, image understanding, embeddings, speech-to-text), `CapabilityService`, `TextCapability`,
-  `OutputCheck`, and `AiKitError::UnsupportedCapability`. `MultiHybridService` routes any of them by which tier has the capability (then the usual privacy/fit/policy rules), re-types free text
-  that is really an image request, and counts bytes sent to the cloud (`RouteStats::cloud_payload_bytes`). `Plan::Unavailable`; new `TaskClass` values.
-- Real backends: `CandleImageService` (Stable Diffusion "turbo" on Candle, CPU/CUDA, PNG out) and `CandleEmbeddingService` (BERT sentence encoder). Multi-file catalog entries (`files:`, each BLAKE3-verified) and `metadata.custom.capability`.
+- Any kind of request: a general `Request`/`Output` contract for five request kinds (`RequestKind`: text, image generation, image understanding, embeddings, speech-to-text), `RequestService`, `TextService`,
+  `OutputCheck`, and `AiKitError::UnsupportedKind`. `MultiHybridService` routes any of them by which tier has the kind (then the usual privacy/fit/policy rules) and counts bytes sent to the cloud
+  (`RouteStats::cloud_payload_bytes`). `Plan::Unavailable { needs_shareable }`; new `TaskClass` values; `RequestKind`, `Request`, `Output` and `TaskClass` are `#[non_exhaustive]`.
+- `RequiresShareable` error (a private request only the cloud could serve), `InferenceErrorCode` and `AiKitError::to_inference_error_code()` for the `hearth.inference.v1` wire contract (proposed, not ratified).
+- `RoutedRequest::with_granted` (the boundary's grant verdict): an ungranted kind is refused with `CapabilityDenied` (now carries `request_kind`) before anything runs. Re-typing free text into an image request is **opt-in**
+  (`MultiHybridService::with_retyping`) and cannot widen a grant.
+- Real backends: `CandleImageService` (`sd_turbo` for development; **`z_image` = Z-Image-Turbo, Apache-2.0**, quantized GGUF transformer dequantized one block at a time, layer-streamed Qwen3 text encoder, tiled VAE; fits a 12 GB card, ~4.5 GB peak at 512x512)
+  and `CandleEmbeddingService` (BERT sentence encoder). Multi-file catalog entries (`files:`, each BLAKE3-verified), `metadata.custom.kind`, and `custom.vram_peak_mb` for models that stream their weights.
+- `ModelRegistry::default_for(kind, allow_noncommercial)`: the catalog default per kind; a non-commercial model is never chosen unless opted in (`--allow-noncommercial`). `ai-kit-cli imagine` and `route --image-model default` use it.
+- Cargo features `text`, `image`, `embedding` (on `candle-base`); `candle` stays the umbrella. `backends/common.rs` holds the shared device, VRAM and verification code.
+- A GPU out-of-memory error from an image backend is a typed `InferenceOom`, not `Internal`.
 - `ai-kit-cli imagine`, `ai-kit-cli embed`; `route` now takes batch lines of any kind.
 - Hybrid local/cloud routing (POC, not ruled on): `HybridInferenceService`, `Router`, `RoutePolicy` (YAML), `Privacy` (default `Private`, fail closed), `Verifier`, `RouteTrace`/`RouteStats`,
   a keyword `classify()`, and `ai-kit-cli route` (`--explain`, `--batch`, `--cloud-cmd`, `--policy`). Private content never reaches the cloud; raster images are delegated, not attempted.
