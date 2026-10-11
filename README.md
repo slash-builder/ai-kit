@@ -135,6 +135,36 @@ request at a time per model. Candle clears its KV cache whenever a forward pass 
 - A finished request's key/value tensors stay in VRAM until the next request overwrites them. Needs a security review before this serves more than one principal (invariant: KV isolation per session).
 - The CPU POC's other limits remain: one chat template ("zephyr"), end-of-sequence looked up as `</s>`, fixed sampler seed.
 
+## Hybrid local/cloud routing — POC (not ruled on)
+
+`HybridInferenceService` (`src/hybrid.rs`) wraps a local `InferenceService` and an optional cloud one behind a `Router`. It is the *mechanism* for the
+locked "local-first with cloud fallback; never local-only, never cloud-first" invariant. Cloud use itself is deferred (v0.2) and the Claude proxy is unruled,
+so this is a dev POC: nothing talks to a network from this module, the cloud side is optional, and the safe behaviour is the default.
+
+**Rules, in order.** (1) *Privacy gate, fail closed:* a request is `Private` unless the caller says `Shareable`; private content never reaches the cloud, not first,
+not as an escalation, not as a fallback after a local error. (2) *Capability:* raster images are not text-in/text-out, so the router `Delegate`s them (Inference Kit has no image
+capability); SVG is text and routes like code. (3) *Fit:* a prompt longer than the local context goes to the cloud if allowed. (4) *Policy:* a per-task-class table says which
+tier goes first and whether to **cascade**: run locally, check the answer with a `Verifier` (`Json`, `NonEmpty`, or your own: run the tests, check the length), and pay for the
+cloud only if the check fails. The plain `infer()` path has no hints, so it is local-only.
+
+```bash
+ai-kit-cli route --explain --batch requests.jsonl --cloud-cmd x --policy policy.yaml       # decisions only, loads nothing
+ai-kit-cli route --batch requests.jsonl --device cuda --cloud-cmd 'claude -p --model haiku ...'   # run (cloud = any command reading stdin; dev only)
+```
+
+**What it bought, measured** (76 tasks, real recorded outcomes for three local and three Claude tiers, replayed under each policy; `docs` of the study in the studio vault):
+
+| local tier | all local | all Claude | Courier tasks private, cascade with cheap verifiers | same, with tests as verifier |
+|---|---|---|---|---|
+| 3B (the only model Candle loads) | 71% | 99% (76 cloud calls) | 84% (10 calls) | 91% (15 calls; 25 with a class table) |
+| 12B | 95% | 99% | **97% (2 calls)** | 99% (3 calls) |
+
+With the 3B tier the router matters a great deal (code 2/10, hard code 1/6, usable SVG 0/3 locally); with a 12B-class tier almost everything stays local and the cloud is a safety net for ~3% of work.
+Making household data private costs the 3B tier 8 points of accuracy and the 12B tier almost none. A cascade only catches *detectable* failures: a JSON check cannot see a wrong label.
+
+**Known limits.** The classifier is a few keyword rules (81/82 on the study prompts, which it was written against, so optimistic). Verifiers check constraints, not quality. Cloud use is counted in calls and tokens, not priced.
+No audit wiring yet (`RouteTrace` carries the data). Raster images are only *delegated*; there is no image service.
+
 ## Cloud Proxy Inference — Claude/Anthropic (experimental, not yet ruled on)
 
 **This is explicitly a `v0.2+` feature, off by default, and not yet blessed

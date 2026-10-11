@@ -13,6 +13,8 @@
 //!   cache-stats                    Print cache_stats() for a freshly constructed service.
 //!   devices                        List the devices `--device` can name (cpu, plus any CUDA GPUs).
 //!   bench ...                      Load once, warm up, then time prefill and decode separately.
+//!   route ...                      Hybrid local/cloud routing (POC): explain a decision, or run requests through the
+//!                                   local backend with an optional cloud command. Dev tool; see src/hybrid.rs.
 
 use std::env;
 use std::process::ExitCode;
@@ -30,6 +32,7 @@ fn main() -> ExitCode {
         "cache-stats" => cmd_cache_stats(&args[2..]),
         "devices" => cmd_devices(),
         "bench" => cmd_bench(&args[2..]),
+        "route" => cmd_route(&args[2..]),
         other => {
             eprintln!("error: unknown subcommand '{other}'");
             eprint_usage();
@@ -46,6 +49,8 @@ fn eprint_usage() {
     );
     eprintln!("  ai-kit-cli cache-stats [--catalog <path>]");
     eprintln!("  ai-kit-cli devices");
+    eprintln!("  ai-kit-cli route (--prompt <text> | --prompt-file <path> | --batch <jsonl>) [--explain] [--class C] [--privacy private|shareable]");
+    eprintln!("                   [--verify none|nonempty|json|svg|exec|maxwords:N] [--local-model <id>] [--device D] [--cloud-cmd <shell cmd>] [--policy <yaml>] [--max-tokens N]");
     eprintln!("  ai-kit-cli bench --model <id> (--prompt <text> | --prompt-file <path>) [--device D] [--max-tokens N] [--repeat R]");
 }
 
@@ -374,4 +379,337 @@ async fn cmd_bench_async(args: &[String]) -> ExitCode {
 fn cmd_bench(_args: &[String]) -> ExitCode {
     eprintln!("ai-kit-cli was built without the `candle` feature — `bench` is unavailable.");
     ExitCode::from(2)
+}
+
+// ------------------------------------------------------------------ route (hybrid local/cloud, dev POC)
+
+#[cfg(not(feature = "candle"))]
+fn cmd_route(_args: &[String]) -> ExitCode {
+    eprintln!("ai-kit-cli was built without the `candle` feature — `route` is unavailable.");
+    ExitCode::from(2)
+}
+
+#[cfg(feature = "candle")]
+fn cmd_route(args: &[String]) -> ExitCode {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    rt.block_on(cmd_route_async(args))
+}
+
+/// Dev-only cloud tier: run a shell command with the prompt on stdin, take stdout as the completion.
+/// (For this POC it is how the `claude` CLI is used, because there is no API key on the dev box.
+/// A real deployment would use `ClaudeProxyInferenceService`, which is unruled; this is not that.)
+#[cfg(feature = "candle")]
+struct CommandCloud {
+    cmd: String,
+}
+
+#[cfg(feature = "candle")]
+#[async_trait::async_trait]
+impl ai_kit::InferenceService for CommandCloud {
+    async fn infer(&self, p: ai_kit::InferenceParams) -> ai_kit::Result<ai_kit::InferenceResponse> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let t = std::time::Instant::now();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&self.cmd)
+            .current_dir("/tmp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(p.prompt.as_bytes())?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            return Err(ai_kit::AiKitError::RemoteBackendError {
+                backend: "command".into(),
+                reason: format!("cloud command exited with {}", out.status),
+            });
+        }
+        let completion = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let pt = (p.prompt.chars().count() / 4) as u32 + 1;
+        let ct = (completion.chars().count() / 4) as u32 + 1;
+        Ok(ai_kit::InferenceResponse {
+            completion,
+            total_tokens: pt + ct,
+            prompt_tokens: pt,
+            completion_tokens: ct,
+            inference_ms: u32::try_from(t.elapsed().as_millis()).unwrap_or(u32::MAX),
+            model_version: "command".into(),
+            quantization: "cloud".into(),
+            session_id: p.session_id.unwrap_or_default(),
+            request_id: p.request_id.unwrap_or_default(),
+        })
+    }
+    async fn load_model(&self, _: &str) -> ai_kit::Result<()> {
+        Ok(())
+    }
+    async fn unload_model(&self, _: &str) -> ai_kit::Result<()> {
+        Ok(())
+    }
+    async fn cache_stats(&self) -> ai_kit::Result<ai_kit::types::CacheStats> {
+        Err(ai_kit::AiKitError::Internal {
+            reason: "n/a".into(),
+        })
+    }
+    async fn end_session(&self, _: &ai_kit::types::SessionId) -> ai_kit::Result<()> {
+        Ok(())
+    }
+}
+
+/// `exec` verifier: pull the first ```python block (or the whole answer) out of a completion,
+/// append `tests`, and run it with python3. Passing means exit code 0 within 10 seconds.
+#[cfg(feature = "candle")]
+fn exec_verifier(tests: String) -> ai_kit::Verifier {
+    ai_kit::Verifier::Custom(std::sync::Arc::new(move |out: &str| {
+        let code = match out.split("```").nth(1) {
+            Some(b) => b.strip_prefix("python").unwrap_or(b).to_string(),
+            None => out.to_string(),
+        };
+        let path = std::env::temp_dir().join(format!("ak-verify-{}.py", std::process::id()));
+        if std::fs::write(&path, format!("{code}\n{tests}\n")).is_err() {
+            return false;
+        }
+        let Ok(mut child) = std::process::Command::new("python3")
+            .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let start = std::time::Instant::now();
+        let ok = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break st.success(),
+                Ok(None) if start.elapsed().as_secs() < 10 => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    break false;
+                }
+            }
+        };
+        let _ = std::fs::remove_file(&path);
+        ok
+    }))
+}
+
+#[cfg(feature = "candle")]
+fn verifier_from(spec: &str, tests: Option<&str>) -> ai_kit::Verifier {
+    // `maxwords:N`: non-empty and at most N whitespace-separated words (a cheap length constraint).
+    if let Some(n) = spec
+        .strip_prefix("maxwords:")
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        return ai_kit::Verifier::Custom(std::sync::Arc::new(move |o: &str| {
+            let w = o.split_whitespace().count();
+            w > 0 && w <= n
+        }));
+    }
+    match spec {
+        "json" => ai_kit::Verifier::Json,
+        "nonempty" => ai_kit::Verifier::NonEmpty,
+        // A standalone vector graphic needs both tags and the SVG namespace; without
+        // `xmlns` a browser shows a broken image (the 3B model omitted it every time).
+        "svg" => ai_kit::Verifier::Custom(std::sync::Arc::new(|o: &str| {
+            let l = o.to_lowercase();
+            l.contains("<svg")
+                && l.contains("</svg>")
+                && (l.contains("xmlns=\"http://www.w3.org/2000/svg\"")
+                    || l.contains("xmlns='http://www.w3.org/2000/svg'"))
+        })),
+        "exec" => tests.map_or(ai_kit::Verifier::None, |t| exec_verifier(t.to_string())),
+        _ => ai_kit::Verifier::None,
+    }
+}
+
+/// One request in a `route` run (from flags or a JSONL batch line).
+#[cfg(feature = "candle")]
+struct RouteJob {
+    id: String,
+    prompt: String,
+    class: Option<ai_kit::TaskClass>,
+    privacy: ai_kit::Privacy,
+    verify: String,
+    tests: Option<String>,
+}
+
+#[cfg(feature = "candle")]
+async fn cmd_route_async(args: &[String]) -> ExitCode {
+    use ai_kit::{
+        CandleInferenceService, DevicePreference, HybridInferenceService, InferenceParams,
+        InferenceService, Privacy, RoutePolicy, RouteRequest, Router, TaskClass,
+    };
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    let explain = args.iter().any(|a| a == "--explain");
+    let policy = match flag_value(args, "--policy") {
+        Some(f) => match std::fs::read_to_string(&f)
+            .map_err(ai_kit::AiKitError::from)
+            .and_then(|s| RoutePolicy::from_yaml(&s))
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: cannot load policy {f}: {e}");
+                return ExitCode::from(2);
+            }
+        },
+        None => RoutePolicy::local_first(),
+    };
+    let max_tokens: u32 = flag_value(args, "--max-tokens")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256);
+    let cloud_cmd = flag_value(args, "--cloud-cmd");
+
+    // Requests: one from flags, or many from a JSONL batch.
+    let mut reqs: Vec<RouteJob> = Vec::new();
+    let parse_privacy = |s: &str| {
+        if s == "shareable" {
+            Privacy::Shareable
+        } else {
+            Privacy::Private
+        }
+    };
+    if let Some(f) = flag_value(args, "--batch") {
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            eprintln!("error: cannot read {f}");
+            return ExitCode::from(2);
+        };
+        for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                eprintln!("error: batch line {} is not JSON", i + 1);
+                return ExitCode::from(2);
+            };
+            let class = v
+                .get("class")
+                .and_then(|c| serde_json::from_value::<TaskClass>(c.clone()).ok());
+            reqs.push(RouteJob {
+                id: v
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?")
+                    .to_string(),
+                prompt: v
+                    .get("prompt")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                class,
+                privacy: parse_privacy(
+                    v.get("privacy")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("private"),
+                ),
+                verify: v
+                    .get("verify")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("none")
+                    .to_string(),
+                tests: v.get("tests").and_then(|x| x.as_str()).map(String::from),
+            });
+        }
+    } else {
+        let prompt = match (
+            flag_value(args, "--prompt"),
+            flag_value(args, "--prompt-file"),
+        ) {
+            (Some(p), _) => p,
+            (None, Some(f)) => std::fs::read_to_string(&f).unwrap_or_default(),
+            _ => {
+                eprintln!("error: route needs --prompt, --prompt-file or --batch");
+                return ExitCode::from(2);
+            }
+        };
+        let class = flag_value(args, "--class")
+            .and_then(|c| serde_json::from_value::<TaskClass>(Value::String(c)).ok());
+        let tests = flag_value(args, "--tests-file").and_then(|f| std::fs::read_to_string(f).ok());
+        reqs.push(RouteJob {
+            id: "1".into(),
+            prompt,
+            class,
+            privacy: parse_privacy(&flag_value(args, "--privacy").unwrap_or_default()),
+            verify: flag_value(args, "--verify").unwrap_or_else(|| "none".into()),
+            tests,
+        });
+    }
+
+    if explain {
+        let router = Router::new(policy);
+        for job in &reqs {
+            let class = job.class.unwrap_or_else(|| ai_kit::classify(&job.prompt));
+            let d = router.decide(
+                class,
+                job.privacy,
+                job.prompt.chars().count() as u32 / 4 + 1,
+                cloud_cmd.is_some(),
+                !matches!(
+                    verifier_from(&job.verify, job.tests.as_deref()),
+                    ai_kit::Verifier::None
+                ),
+            );
+            println!("{}", json!({"id": job.id, "decision": d}));
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let catalog_path = flag_value(args, "--catalog").unwrap_or_else(default_catalog_path);
+    let local_model = flag_value(args, "--local-model").unwrap_or_else(|| "probe".into());
+    let device = flag_value(args, "--device")
+        .or_else(|| env::var("AI_KIT_DEVICE").ok())
+        .and_then(|v| v.parse::<DevicePreference>().ok())
+        .unwrap_or_default();
+    let local = match CandleInferenceService::with_device(&catalog_path, device) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: failed to load catalog {catalog_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = local.load_model(&local_model).await {
+        eprintln!("error: failed to load model '{local_model}': {e}");
+        return ExitCode::FAILURE;
+    }
+    let cloud: Option<(Arc<dyn InferenceService>, String)> = cloud_cmd.map(|c| {
+        (
+            Arc::new(CommandCloud { cmd: c }) as Arc<dyn InferenceService>,
+            flag_value(args, "--cloud-model").unwrap_or_else(|| "cloud".into()),
+        )
+    });
+    let hybrid = HybridInferenceService::new(Arc::new(local), local_model, cloud, policy);
+
+    for job in reqs {
+        let (id, class, privacy) = (job.id, job.class, job.privacy);
+        let mut r = RouteRequest::new(InferenceParams {
+            model_id: String::new(),
+            prompt: job.prompt,
+            temperature: 0.0,
+            top_p: 1.0,
+            max_tokens,
+            session_id: None,
+            preferred_quantization: None,
+            request_id: None,
+        });
+        r.class = class;
+        r.privacy = privacy;
+        r.verifier = verifier_from(&job.verify, job.tests.as_deref());
+        match hybrid.infer_routed(r).await {
+            Ok((resp, trace)) => println!(
+                "{}",
+                json!({"id": id, "ok": true, "completion": resp.completion, "trace": trace})
+            ),
+            Err(e) => println!("{}", json!({"id": id, "ok": false, "error": e.to_string()})),
+        }
+    }
+    eprintln!("{}", json!({"stats": hybrid.route_stats()}));
+    ExitCode::SUCCESS
 }
