@@ -63,9 +63,11 @@
 #[cfg(any(feature = "candle-base", feature = "claude-proxy"))]
 pub mod backends;
 pub mod cache;
+pub mod egress;
 pub mod error;
 pub mod hybrid;
 pub mod modality;
+pub mod provider;
 pub mod registry;
 pub mod routed;
 pub mod service;
