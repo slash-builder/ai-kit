@@ -129,8 +129,12 @@ impl ImageGenParams {
         if self.prompt.trim().is_empty() {
             return bad("prompt cannot be empty".into());
         }
-        if self.prompt.chars().count() > 4000 {
-            return bad("prompt is longer than 4000 characters".into());
+        if self.prompt.chars().count() > limits::PROMPT_MAX_CHARS {
+            return Err(too_large(
+                "prompt_chars",
+                limits::PROMPT_MAX_CHARS as u64,
+                self.prompt.chars().count() as u64,
+            ));
         }
         for (name, v) in [("width", self.width), ("height", self.height)] {
             if !(64..=2048).contains(&v) || v % 8 != 0 {
@@ -139,11 +143,19 @@ impl ImageGenParams {
                 ));
             }
         }
-        if u64::from(self.width) * u64::from(self.height) > 2048 * 1536 {
-            return bad("image is larger than 2048x1536 pixels".into());
+        let pixels = u64::from(self.width) * u64::from(self.height);
+        if pixels > limits::IMAGE_GEN_MAX_PIXELS {
+            return Err(too_large("image_pixels", limits::IMAGE_GEN_MAX_PIXELS, pixels));
         }
-        if !(1..=100).contains(&self.steps) {
-            return bad(format!("steps must be 1-100, got {}", self.steps));
+        if self.steps == 0 {
+            return bad("steps must be at least 1".into());
+        }
+        if self.steps > limits::IMAGE_GEN_MAX_STEPS {
+            return Err(too_large(
+                "steps",
+                u64::from(limits::IMAGE_GEN_MAX_STEPS),
+                u64::from(self.steps),
+            ));
         }
         if !(0.0..=20.0).contains(&self.guidance_scale) {
             return bad(format!(
@@ -324,6 +336,27 @@ impl Request {
                 if p.prompt.trim().is_empty() {
                     return bad("image_understanding needs a question about the image");
                 }
+                if p.prompt.chars().count() > limits::PROMPT_MAX_CHARS {
+                    return Err(too_large(
+                        "prompt_chars",
+                        limits::PROMPT_MAX_CHARS as u64,
+                        p.prompt.chars().count() as u64,
+                    ));
+                }
+                if p.image.len() > limits::IMAGE_INPUT_MAX_BYTES {
+                    return Err(too_large(
+                        "image_bytes",
+                        limits::IMAGE_INPUT_MAX_BYTES as u64,
+                        p.image.len() as u64,
+                    ));
+                }
+                // judge the decoded size from the header, before any decoder sees the bytes
+                if let Some((w, h)) = png_dims(&p.image) {
+                    let px = u64::from(w) * u64::from(h);
+                    if px > limits::IMAGE_INPUT_MAX_PIXELS {
+                        return Err(too_large("image_pixels", limits::IMAGE_INPUT_MAX_PIXELS, px));
+                    }
+                }
                 Ok(())
             }
             Request::Embedding(p) => {
@@ -336,16 +369,110 @@ impl Request {
                 if p.inputs.iter().any(|s| s.trim().is_empty()) {
                     return bad("embedding inputs cannot be empty");
                 }
+                if let Some(n) = p
+                    .inputs
+                    .iter()
+                    .map(|s| s.chars().count())
+                    .find(|n| *n > limits::EMBED_MAX_CHARS_PER_INPUT)
+                {
+                    return Err(too_large(
+                        "embedding_input_chars",
+                        limits::EMBED_MAX_CHARS_PER_INPUT as u64,
+                        n as u64,
+                    ));
+                }
+                let total: usize = p.inputs.iter().map(String::len).sum();
+                if total > limits::EMBED_MAX_TOTAL_BYTES {
+                    return Err(too_large(
+                        "embedding_total_bytes",
+                        limits::EMBED_MAX_TOTAL_BYTES as u64,
+                        total as u64,
+                    ));
+                }
                 Ok(())
             }
             Request::SpeechToText(p) => {
                 if p.audio.is_empty() {
                     return bad("speech_to_text needs audio");
                 }
-                Ok(())
+                if p.audio.len() > limits::AUDIO_MAX_BYTES {
+                    return Err(too_large(
+                        "audio_bytes",
+                        limits::AUDIO_MAX_BYTES as u64,
+                        p.audio.len() as u64,
+                    ));
+                }
+                match (p.format, wav_duration_seconds(&p.audio)) {
+                    (AudioFormat::Wav, None) => bad("audio is not a readable WAV file"),
+                    (AudioFormat::Wav, Some(secs)) if secs > limits::AUDIO_MAX_SECONDS as f64 => {
+                        Err(too_large(
+                            "audio_seconds",
+                            limits::AUDIO_MAX_SECONDS,
+                            secs.ceil() as u64,
+                        ))
+                    }
+                    _ => Ok(()),
+                }
             }
         }
     }
+}
+
+/// Per-kind size limits, enforced by [`Request::validate`] **before** routing, so an oversized request is refused with
+/// [`AiKitError::RequestTooLarge`] instead of reaching a backend (DJ ruling 2026-10-11: reject, do not crash).
+///
+/// These are the kit-wide ceilings; a particular model may allow less (`InferenceOom` still applies for what does not fit).
+/// The figures are proposals from the security review, not benchmarks, and are expected to move.
+pub mod limits {
+    /// Largest generated image, in pixels (1024 x 1024).
+    pub const IMAGE_GEN_MAX_PIXELS: u64 = 1024 * 1024;
+    /// Most denoising steps a request may ask for.
+    pub const IMAGE_GEN_MAX_STEPS: u32 = 50;
+    /// Longest text prompt, in characters.
+    pub const PROMPT_MAX_CHARS: usize = 4000;
+    /// Largest input image for image understanding, in bytes.
+    pub const IMAGE_INPUT_MAX_BYTES: usize = 10 << 20;
+    /// Largest input image, in decoded pixels, checked from the header **before** decoding (decompression bombs).
+    pub const IMAGE_INPUT_MAX_PIXELS: u64 = 4096 * 4096;
+    /// Longest single text to embed, in characters.
+    pub const EMBED_MAX_CHARS_PER_INPUT: usize = 8000;
+    /// Most text one embedding request may carry, in bytes.
+    pub const EMBED_MAX_TOTAL_BYTES: usize = 1 << 20;
+    /// Largest audio input, in bytes.
+    pub const AUDIO_MAX_BYTES: usize = 50 << 20;
+    /// Longest audio input, in seconds (read from the WAV header).
+    pub const AUDIO_MAX_SECONDS: u64 = 600;
+}
+
+fn too_large(limit_name: &str, limit: u64, actual: u64) -> AiKitError {
+    AiKitError::RequestTooLarge {
+        limit_name: limit_name.to_string(),
+        limit,
+        actual,
+    }
+}
+
+/// Duration in seconds of a PCM WAV file, from its header (`None` if it is not a readable WAV).
+pub fn wav_duration_seconds(b: &[u8]) -> Option<f64> {
+    if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
+        return None;
+    }
+    let (mut pos, mut byte_rate) = (12usize, None);
+    while pos + 8 <= b.len() {
+        let id = &b[pos..pos + 4];
+        let size = u32::from_le_bytes(b[pos + 4..pos + 8].try_into().ok()?) as usize;
+        let body = pos + 8;
+        if id == b"fmt " && body + 12 <= b.len() {
+            byte_rate = Some(u32::from_le_bytes(b[body + 8..body + 12].try_into().ok()?));
+        } else if id == b"data" {
+            // a streamed file may claim 0xFFFFFFFF bytes; never believe more than is actually there
+            let data = size.min(b.len() - body);
+            let rate = byte_rate.filter(|r| *r > 0)?;
+            return Some(data as f64 / f64::from(rate));
+        }
+        pos = body.checked_add(size)?.checked_add(size & 1)?;
+    }
+    None
 }
 
 /// Any answer the kit can give.
@@ -688,5 +815,109 @@ mod tests {
     fn png_dims_reads_the_header() {
         assert_eq!(png_dims(&tiny_png(640, 480)), Some((640, 480)));
         assert_eq!(png_dims(b"not a png at all, definitely not"), None);
+    }
+
+    fn wav(seconds: u32, claimed_data: Option<u32>) -> Vec<u8> {
+        // 8 kHz mono 16-bit PCM: 16000 bytes per second
+        let data = seconds * 16_000;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&[1, 0, 1, 0]); // PCM, mono
+        b.extend_from_slice(&8000u32.to_le_bytes());
+        b.extend_from_slice(&16_000u32.to_le_bytes()); // byte rate
+        b.extend_from_slice(&[2, 0, 16, 0]);
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&claimed_data.unwrap_or(data).to_le_bytes());
+        b.extend(std::iter::repeat_n(0u8, data as usize));
+        b
+    }
+
+    fn too_large_name(r: Result<()>) -> Option<String> {
+        match r {
+            Err(AiKitError::RequestTooLarge { limit_name, .. }) => Some(limit_name),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn image_generation_over_the_pixel_or_step_limit_is_refused_and_at_the_limit_is_fine() {
+        let mut p = ImageGenParams::new("m", "a cat");
+        p.width = 1024;
+        p.height = 1024;
+        p.steps = 50;
+        assert!(p.validate().is_ok(), "exactly at both limits is allowed");
+        p.width = 2048; // 2048 x 1024 = 2x the pixel limit
+        assert_eq!(too_large_name(p.validate()).as_deref(), Some("image_pixels"));
+        p.width = 1024;
+        p.steps = 51;
+        assert_eq!(too_large_name(p.validate()).as_deref(), Some("steps"));
+        p.steps = 0;
+        assert!(matches!(p.validate(), Err(AiKitError::InvalidParams { .. })), "zero steps is a bad parameter, not an oversize");
+    }
+
+    #[test]
+    fn image_input_is_judged_by_bytes_and_by_its_header_before_decoding() {
+        let mk = |image: Vec<u8>| {
+            Request::ImageUnderstanding(ImageUnderstandingParams {
+                model_id: "m".into(),
+                image,
+                mime: "image/png".into(),
+                prompt: "what is this".into(),
+                max_tokens: 16,
+                session_id: None,
+                request_id: None,
+            })
+        };
+        assert!(mk(tiny_png(4096, 4096)).validate().is_ok(), "at the pixel limit");
+        // a 30-byte file whose header claims 100000 x 100000 pixels: a decompression bomb, refused without decoding
+        assert_eq!(too_large_name(mk(tiny_png(100_000, 100_000)).validate()).as_deref(), Some("image_pixels"));
+        let mut big = tiny_png(10, 10);
+        big.resize(limits::IMAGE_INPUT_MAX_BYTES + 1, 0);
+        assert_eq!(too_large_name(mk(big).validate()).as_deref(), Some("image_bytes"));
+    }
+
+    #[test]
+    fn embedding_inputs_are_limited_per_text_and_in_total() {
+        let mk = |inputs: Vec<String>| {
+            Request::Embedding(EmbeddingParams {
+                model_id: "m".into(),
+                inputs,
+                normalize: true,
+                session_id: None,
+                request_id: None,
+            })
+        };
+        assert!(mk(vec!["x".repeat(limits::EMBED_MAX_CHARS_PER_INPUT)]).validate().is_ok());
+        assert_eq!(too_large_name(mk(vec!["x".repeat(limits::EMBED_MAX_CHARS_PER_INPUT + 1)]).validate()).as_deref(), Some("embedding_input_chars"));
+        // 200 texts of 8000 bytes = 1.6 MB, each one fine on its own
+        let many = vec!["x".repeat(limits::EMBED_MAX_CHARS_PER_INPUT); 200];
+        assert_eq!(too_large_name(mk(many).validate()).as_deref(), Some("embedding_total_bytes"));
+    }
+
+    #[test]
+    fn audio_is_limited_by_the_duration_in_its_wav_header_and_by_bytes() {
+        let mk = |audio: Vec<u8>| {
+            Request::SpeechToText(SpeechParams {
+                model_id: "m".into(),
+                audio,
+                format: AudioFormat::Wav,
+                language: None,
+                session_id: None,
+                request_id: None,
+            })
+        };
+        assert!(mk(wav(3, None)).validate().is_ok());
+        assert_eq!(wav_duration_seconds(&wav(3, None)).map(|d| d.round() as u32), Some(3));
+        // 601 s is 9.6 MB: under the byte limit, over the duration limit
+        assert_eq!(too_large_name(mk(wav(601, None)).validate()).as_deref(), Some("audio_seconds"));
+        // a header that claims 4 GB of data but carries 3 s is believed only for what is there
+        assert!(mk(wav(3, Some(u32::MAX))).validate().is_ok());
+        let mut huge = wav(1, None);
+        huge.resize(limits::AUDIO_MAX_BYTES + 1, 0);
+        assert_eq!(too_large_name(mk(huge).validate()).as_deref(), Some("audio_bytes"));
+        assert!(matches!(mk(b"definitely not a wav file".to_vec()).validate(), Err(AiKitError::InvalidParams { .. })));
     }
 }

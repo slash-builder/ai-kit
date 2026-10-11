@@ -60,6 +60,14 @@ pub enum AiKitError {
         reason: String,
     },
 
+    /// A request exceeded a per-kind size limit (see `modality::limits`). Rejected up front, before anything is loaded or sent.
+    #[error("Request too large: {limit_name} is {actual}, the limit is {limit}")]
+    RequestTooLarge {
+        limit_name: String,
+        limit: u64,
+        actual: u64,
+    },
+
     /// The only tier that could serve this request is the cloud, and the content is private.
     /// The caller must mark the content shareable (and be allowed to) for it to run.
     #[error(
@@ -154,6 +162,8 @@ pub enum InferenceErrorCode {
     /// Integrity or load failure. The message must not include hashes.
     ModelUnavailable = 13,
     Internal = 15,
+    /// A request exceeded a per-kind size limit (`{limit_name, limit}` belong in the details). Provisional.
+    RequestTooLarge = 16,
 }
 
 impl AiKitError {
@@ -172,6 +182,7 @@ impl AiKitError {
             AiKitError::InvalidParams { .. } => C::InvalidParams,
             AiKitError::UnsupportedKind { .. } => C::RequestKindUnsupported,
             AiKitError::RequiresShareable { .. } => C::RequiresShareable,
+            AiKitError::RequestTooLarge { .. } => C::RequestTooLarge,
             AiKitError::RemoteBackendError { .. } => C::RemoteBackendFailed,
             AiKitError::ModelLoadFailed { .. } | AiKitError::IntegrityCheckFailed { .. } => {
                 C::ModelUnavailable
@@ -233,6 +244,14 @@ mod tests {
                     reason: "r".into(),
                 },
                 C::RequestKindUnsupported,
+            ),
+            (
+                AiKitError::RequestTooLarge {
+                    limit_name: "image_pixels".into(),
+                    limit: 1,
+                    actual: 2,
+                },
+                C::RequestTooLarge,
             ),
             (
                 AiKitError::RequiresShareable {
