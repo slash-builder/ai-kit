@@ -70,7 +70,7 @@ pub mod types;
 
 // Re-export key types at crate root
 #[cfg(feature = "candle")]
-pub use backends::CandleInferenceService;
+pub use backends::{describe_cuda_devices, CandleInferenceService, DevicePreference};
 #[cfg(feature = "claude-proxy")]
 pub use backends::{ClaudeProxyConfig, ClaudeProxyInferenceService};
 pub use error::{AiKitError, Result};
