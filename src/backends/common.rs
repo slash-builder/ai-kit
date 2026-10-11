@@ -211,6 +211,44 @@ pub fn describe_cuda_devices() -> Vec<String> {
     }
 }
 
+/// True if an error message is a GPU out-of-memory (Candle surfaces it as text, e.g. `CUDA_ERROR_OUT_OF_MEMORY`).
+pub(crate) fn looks_like_oom(text: &str) -> bool {
+    let t = text.to_ascii_uppercase();
+    t.contains("OUT_OF_MEMORY") || t.contains("OUT OF MEMORY")
+}
+
+/// Free GPU memory in MB, if `device` is a CUDA device that can be queried.
+#[cfg(feature = "cuda")]
+fn free_vram_mb(device: &Device) -> Option<u64> {
+    let ctx = device
+        .as_cuda_device()
+        .ok()?
+        .cuda_stream()
+        .context()
+        .clone();
+    ctx.mem_get_info().ok().map(|(free, _)| (free >> 20) as u64)
+}
+#[cfg(not(feature = "cuda"))]
+fn free_vram_mb(_device: &Device) -> Option<u64> {
+    None
+}
+
+/// Turn an `Internal` error that is really a GPU out-of-memory into a typed `InferenceOom`, so callers and the wire contract can tell
+/// "does not fit" from "broken". `required_mb` is 0 because the real need is not known at that point; `available_mb` is the free
+/// memory right now when it can be read. Any other error is returned unchanged.
+pub(crate) fn promote_oom(e: AiKitError, model_id: &str, device: Option<&Device>) -> AiKitError {
+    match e {
+        AiKitError::Internal { ref reason } if looks_like_oom(reason) => AiKitError::InferenceOom {
+            model_id: model_id.to_string(),
+            required_mb: 0,
+            available_mb: device
+                .and_then(free_vram_mb)
+                .map_or(0, |m| u32::try_from(m).unwrap_or(u32::MAX)),
+        },
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +288,32 @@ mod tests {
     fn vram_estimate_has_a_floor_for_small_models() {
         // 100 MB of weights: 15% = 15 MB, so the 384 MB floor applies.
         assert_eq!(vram_needed_mb(&model(100 << 20, 1)), 100 + 384);
+    }
+
+    #[test]
+    fn a_gpu_out_of_memory_message_becomes_a_typed_error_and_nothing_else_does() {
+        let oom = AiKitError::Internal {
+            reason: "z_image vae decode: DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\")"
+                .into(),
+        };
+        assert!(matches!(
+            promote_oom(oom, "m", None),
+            AiKitError::InferenceOom { .. }
+        ));
+        let other = AiKitError::Internal {
+            reason: "shape mismatch".into(),
+        };
+        assert!(matches!(
+            promote_oom(other, "m", None),
+            AiKitError::Internal { .. }
+        ));
+        let typed = AiKitError::ModelNotFound {
+            model_id: "m".into(),
+        };
+        assert!(matches!(
+            promote_oom(typed, "m", None),
+            AiKitError::ModelNotFound { .. }
+        ));
     }
 
     #[test]

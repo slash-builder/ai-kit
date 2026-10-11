@@ -78,6 +78,15 @@ pub struct CandleImageService {
     loaded: RwLock<HashMap<String, Arc<Mutex<LoadedImage>>>>,
 }
 
+impl LoadedImage {
+    fn device(&self) -> &Device {
+        match self {
+            LoadedImage::SdTurbo(m) => &m.device,
+            LoadedImage::ZImage { pipeline, .. } => pipeline.device(),
+        }
+    }
+}
+
 impl CandleImageService {
     pub fn new(catalog_path: &str, device: DevicePreference) -> Result<Self> {
         Ok(Self {
@@ -216,6 +225,18 @@ impl CandleImageService {
     }
 
     fn generate(&self, p: &ImageGenParams) -> Result<GeneratedImage> {
+        self.generate_inner(p).map_err(|e| {
+            let device = self
+                .loaded
+                .read()
+                .ok()
+                .and_then(|l| l.get(&p.model_id).cloned())
+                .and_then(|m| m.lock().ok().map(|m| m.device().clone()));
+            crate::backends::common::promote_oom(e, &p.model_id, device.as_ref())
+        })
+    }
+
+    fn generate_inner(&self, p: &ImageGenParams) -> Result<GeneratedImage> {
         p.validate()?;
         self.load_model(&p.model_id)?;
         let model = self

@@ -96,6 +96,10 @@ impl ZImagePipeline {
         }
     }
 
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
+    }
+
     /// Check the request against what this model can do (before any weight is read).
     pub(crate) fn validate(p: &ImageGenParams) -> Result<()> {
         if !p.width.is_multiple_of(16) || !p.height.is_multiple_of(16) {
