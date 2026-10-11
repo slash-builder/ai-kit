@@ -112,6 +112,9 @@ cuda = ["candle", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cud
 # time — see `src/backends/claude_proxy.rs` module doc.
 claude-proxy = ["dep:reqwest"]
 
+# The Claude Messages API as a ProviderAdapter (see src/providers/anthropic.rs). Off by default; tested against mocks only, no key exists yet.
+provider-anthropic = ["dep:reqwest"]
+
 [dev-dependencies]
 # Test fixtures
 tokio-test = "0.4"

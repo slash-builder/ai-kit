@@ -71,6 +71,8 @@ pub mod hybrid;
 pub mod modality;
 pub mod model_card;
 pub mod provider;
+#[cfg(feature = "provider-anthropic")]
+pub mod providers;
 pub mod registry;
 pub mod routed;
 pub mod service;
