@@ -119,6 +119,38 @@ impl ModelRegistry {
         self.models.values().collect()
     }
 
+    /// The model to use for `kind` when the caller names none.
+    ///
+    /// An entry marked `custom.default: "true"` wins; otherwise the first by id (the registry is unordered, so this is made
+    /// deterministic). A model whose licence forbids commercial use (`custom.license` starting `non-commercial` or
+    /// `research`, see [`ModelMetadata::licence_class`]) is **never** chosen unless `allow_noncommercial` is set, so a
+    /// development-only model such as `sd-turbo` cannot silently become what a product ships.
+    pub fn default_for(
+        &self,
+        kind: crate::modality::RequestKind,
+        allow_noncommercial: bool,
+    ) -> Option<&ModelMetadata> {
+        let mut ok: Vec<&ModelMetadata> = self
+            .models
+            .values()
+            .filter(|m| m.kind() == kind)
+            .filter(|m| {
+                allow_noncommercial
+                    || m.licence_class() != crate::types::LicenceClass::NonCommercial
+            })
+            .collect();
+        ok.sort_by(|a, b| a.id.cmp(&b.id));
+        ok.iter()
+            .find(|m| {
+                m.metadata
+                    .custom
+                    .get("default")
+                    .is_some_and(|d| d == "true")
+            })
+            .or(ok.first())
+            .copied()
+    }
+
     /// Add a model to the registry (for testing or dynamic registration).
     pub fn add(&mut self, model: ModelMetadata) {
         self.models.insert(model.id.clone(), model);
@@ -175,6 +207,26 @@ impl ModelRegistry {
                 });
             }
 
+            if let Some(c) = model.metadata.custom.get("kind") {
+                if c.parse::<crate::modality::RequestKind>().is_err() {
+                    return Err(crate::error::AiKitError::Internal {
+                        reason: format!("Model {} has unknown request kind '{c}'", model.id),
+                    });
+                }
+            }
+            if let Some(f) = model
+                .files
+                .iter()
+                .find(|f| f.hash.is_empty() || f.role.is_empty())
+            {
+                return Err(crate::error::AiKitError::Internal {
+                    reason: format!(
+                        "Model {} has a file ('{}') with no role or no hash",
+                        model.id, f.role
+                    ),
+                });
+            }
+
             if model.metadata.vram_required_mb == 0 {
                 return Err(crate::error::AiKitError::Internal {
                     reason: format!("Model {} has zero VRAM requirement", model.id),
@@ -209,6 +261,7 @@ mod tests {
                 framework: "candle".to_string(),
                 custom: Default::default(),
             },
+            files: Vec::new(),
         }
     }
 
@@ -338,5 +391,47 @@ models:
 
         let result = ModelRegistry::load_from_file(path.to_str().unwrap());
         assert!(result.is_err());
+    }
+
+    fn img(id: &str, licence: Option<&str>, default: bool) -> ModelMetadata {
+        let mut m = create_test_model();
+        m.id = id.to_string();
+        m.metadata
+            .custom
+            .insert("kind".into(), "image_generation".into());
+        if let Some(l) = licence {
+            m.metadata.custom.insert("license".into(), l.into());
+        }
+        if default {
+            m.metadata.custom.insert("default".into(), "true".into());
+        }
+        m
+    }
+
+    #[test]
+    fn a_non_commercial_model_is_never_the_default_unless_asked_for() {
+        let mut r = ModelRegistry::new("t".into(), "1".into());
+        r.add(img("a-sd-turbo", Some("non-commercial research"), true)); // sorts first AND is flagged default
+        r.add(img("z-image-turbo", Some("Apache-2.0"), false));
+        let k = crate::modality::RequestKind::ImageGeneration;
+        assert_eq!(r.default_for(k, false).unwrap().id, "z-image-turbo");
+        assert_eq!(
+            r.default_for(k, true).unwrap().id,
+            "a-sd-turbo",
+            "opting in allows it"
+        );
+    }
+
+    #[test]
+    fn a_flagged_default_beats_alphabetical_order_and_no_candidate_is_none() {
+        let mut r = ModelRegistry::new("t".into(), "1".into());
+        let k = crate::modality::RequestKind::ImageGeneration;
+        assert!(r.default_for(k, false).is_none());
+        r.add(img("a", Some("MIT"), false));
+        r.add(img("b", Some("Apache-2.0"), true));
+        assert_eq!(r.default_for(k, false).unwrap().id, "b");
+        assert!(r
+            .default_for(crate::modality::RequestKind::Embedding, false)
+            .is_none());
     }
 }

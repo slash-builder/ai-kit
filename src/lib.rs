@@ -60,18 +60,26 @@
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 
-#[cfg(any(feature = "candle", feature = "claude-proxy"))]
+#[cfg(any(feature = "candle-base", feature = "claude-proxy"))]
 pub mod backends;
 pub mod cache;
 pub mod error;
 pub mod hybrid;
+pub mod modality;
 pub mod registry;
+pub mod routed;
 pub mod service;
 pub mod types;
 
 // Re-export key types at crate root
-#[cfg(feature = "candle")]
-pub use backends::{describe_cuda_devices, CandleInferenceService, DevicePreference};
+#[cfg(feature = "embedding")]
+pub use backends::CandleEmbeddingService;
+#[cfg(feature = "image")]
+pub use backends::CandleImageService;
+#[cfg(feature = "text")]
+pub use backends::CandleInferenceService;
+#[cfg(feature = "candle-base")]
+pub use backends::{describe_cuda_devices, DevicePreference};
 #[cfg(feature = "claude-proxy")]
 pub use backends::{ClaudeProxyConfig, ClaudeProxyInferenceService};
 pub use error::{AiKitError, Result};
@@ -79,8 +87,14 @@ pub use hybrid::{
     classify, ClassPolicy, Decision, HybridInferenceService, Plan, Privacy, RoutePolicy,
     RouteRequest, RouteStats, RouteTrace, Router, TaskClass, Tier, Verifier,
 };
+pub use modality::{
+    AudioFormat, EmbeddingParams, EmbeddingResponse, GeneratedImage, ImageGenParams,
+    ImageUnderstandingParams, Output, OutputCheck, Request, RequestKind, RequestService,
+    SpeechParams, TextService, TranscriptResponse,
+};
+pub use routed::{MultiHybridService, RoutedRequest};
 pub use service::InferenceService;
-pub use types::{InferenceParams, InferenceResponse, ModelMetadata};
+pub use types::{InferenceParams, InferenceResponse, ModelFile, ModelMetadata};
 
 /// Library version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

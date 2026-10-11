@@ -33,6 +33,8 @@ fn main() -> ExitCode {
         "devices" => cmd_devices(),
         "bench" => cmd_bench(&args[2..]),
         "route" => cmd_route(&args[2..]),
+        "imagine" => cmd_imagine(&args[2..]),
+        "embed" => cmd_embed(&args[2..]),
         other => {
             eprintln!("error: unknown subcommand '{other}'");
             eprint_usage();
@@ -51,6 +53,8 @@ fn eprint_usage() {
     eprintln!("  ai-kit-cli devices");
     eprintln!("  ai-kit-cli route (--prompt <text> | --prompt-file <path> | --batch <jsonl>) [--explain] [--class C] [--privacy private|shareable]");
     eprintln!("                   [--verify none|nonempty|json|svg|exec|maxwords:N] [--local-model <id>] [--device D] [--cloud-cmd <shell cmd>] [--policy <yaml>] [--max-tokens N]");
+    eprintln!("  ai-kit-cli imagine --model <id> --prompt <text> --out <file.png> [--width N] [--height N] [--steps N] [--seed N] [--guidance F] [--negative <text>] [--device D]");
+    eprintln!("  ai-kit-cli embed --model <id> (--text <t> ...) [--query <q>] [--device D]");
     eprintln!("  ai-kit-cli bench --model <id> (--prompt <text> | --prompt-file <path>) [--device D] [--max-tokens N] [--repeat R]");
 }
 
@@ -536,18 +540,139 @@ fn verifier_from(spec: &str, tests: Option<&str>) -> ai_kit::Verifier {
 #[cfg(feature = "candle")]
 struct RouteJob {
     id: String,
+    kind: ai_kit::RequestKind,
     prompt: String,
     class: Option<ai_kit::TaskClass>,
     privacy: ai_kit::Privacy,
     verify: String,
     tests: Option<String>,
+    width: u32,
+    height: u32,
+    steps: u32,
+    seed: Option<u64>,
+    inputs: Vec<String>,
+    /// Audio or image file for `speech_to_text` / `image_understanding`.
+    file: Option<String>,
+}
+
+/// The output check for a request: text uses the text verifiers; every other kind uses the modality's sanity check
+/// (`verify: "sane"`, or any non-`none` value).
+#[cfg(feature = "candle")]
+fn check_for(job: &RouteJob) -> ai_kit::OutputCheck {
+    use ai_kit::{Output, OutputCheck};
+    // `sane` means the modality's sanity check, whatever the request is: free text that gets re-typed as an
+    // image request must be checked as an image.
+    if job.verify == "sane" {
+        OutputCheck::Sane
+    } else if job.kind == ai_kit::RequestKind::TextGeneration {
+        match verifier_from(&job.verify, job.tests.as_deref()) {
+            ai_kit::Verifier::None => OutputCheck::None,
+            v => OutputCheck::Custom(std::sync::Arc::new(move |o: &Output| match o {
+                Output::Text(t) => v.check(&t.completion).unwrap_or(true),
+                _ => true,
+            })),
+        }
+    } else if job.verify == "none" {
+        OutputCheck::None
+    } else {
+        OutputCheck::Sane
+    }
+}
+
+#[cfg(feature = "candle")]
+fn parse_privacy(s: &str) -> ai_kit::Privacy {
+    if s == "shareable" {
+        ai_kit::Privacy::Shareable
+    } else {
+        ai_kit::Privacy::Private
+    }
+}
+
+#[cfg(feature = "candle")]
+fn device_flag(args: &[String]) -> ai_kit::DevicePreference {
+    flag_value(args, "--device")
+        .or_else(|| env::var("AI_KIT_DEVICE").ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "candle")]
+fn job_request(job: &RouteJob) -> Result<ai_kit::Request, String> {
+    use ai_kit::{
+        AudioFormat, EmbeddingParams, ImageGenParams, ImageUnderstandingParams, InferenceParams,
+        Request, SpeechParams,
+    };
+    let bytes = || -> Result<Vec<u8>, String> {
+        let f = job.file.as_deref().ok_or("this kind needs a \"file\"")?;
+        std::fs::read(f).map_err(|e| format!("cannot read {f}: {e}"))
+    };
+    Ok(match job.kind {
+        ai_kit::RequestKind::ImageGeneration => {
+            let mut p = ImageGenParams::new(String::new(), job.prompt.clone());
+            p.width = job.width;
+            p.height = job.height;
+            p.steps = job.steps;
+            p.seed = job.seed;
+            Request::ImageGeneration(p)
+        }
+        ai_kit::RequestKind::Embedding => Request::Embedding(EmbeddingParams {
+            model_id: String::new(),
+            inputs: job.inputs.clone(),
+            normalize: true,
+            session_id: None,
+            request_id: None,
+        }),
+        ai_kit::RequestKind::ImageUnderstanding => {
+            let mime = match job.file.as_deref().and_then(|f| f.rsplit('.').next()) {
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("webp") => "image/webp",
+                _ => "image/png",
+            };
+            Request::ImageUnderstanding(ImageUnderstandingParams {
+                model_id: String::new(),
+                image: bytes()?,
+                mime: mime.into(),
+                prompt: job.prompt.clone(),
+                max_tokens: 256,
+                session_id: None,
+                request_id: None,
+            })
+        }
+        ai_kit::RequestKind::SpeechToText => Request::SpeechToText(SpeechParams {
+            model_id: String::new(),
+            audio: bytes()?,
+            format: AudioFormat::Wav,
+            language: None,
+            session_id: None,
+            request_id: None,
+        }),
+        ai_kit::RequestKind::TextGeneration => Request::Text(InferenceParams {
+            model_id: String::new(),
+            prompt: job.prompt.clone(),
+            temperature: 0.0,
+            top_p: 1.0,
+            max_tokens: 256,
+            session_id: None,
+            preferred_quantization: None,
+            request_id: None,
+        }),
+        // RequestKind is non_exhaustive: a kind added to the library later must be an explicit error here, never a text request.
+        other => {
+            return Err(format!(
+                "this CLI cannot build a '{}' request",
+                other.as_str()
+            ))
+        }
+    })
 }
 
 #[cfg(feature = "candle")]
 async fn cmd_route_async(args: &[String]) -> ExitCode {
+    use ai_kit::routed::TierBackend;
     use ai_kit::{
-        CandleInferenceService, DevicePreference, HybridInferenceService, InferenceParams,
-        InferenceService, Privacy, RoutePolicy, RouteRequest, Router, TaskClass,
+        CandleEmbeddingService, CandleImageService, CandleInferenceService, InferenceService,
+        MultiHybridService, Output, RequestKind, RoutePolicy, RoutedRequest, TaskClass,
+        TextService,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -570,15 +695,39 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
         .and_then(|v| v.parse().ok())
         .unwrap_or(256);
     let cloud_cmd = flag_value(args, "--cloud-cmd");
+    let out_dir = flag_value(args, "--out-dir").unwrap_or_else(|| ".".into());
 
-    // Requests: one from flags, or many from a JSONL batch.
+    // Requests: one from flags, or many from a JSONL batch (one JSON object per line).
     let mut reqs: Vec<RouteJob> = Vec::new();
-    let parse_privacy = |s: &str| {
-        if s == "shareable" {
-            Privacy::Shareable
-        } else {
-            Privacy::Private
-        }
+    let from_json = |i: usize, v: &Value| -> Result<RouteJob, String> {
+        let s = |k: &str, d: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or(d).to_string();
+        let kind: RequestKind = s("kind", "text_generation").parse()?;
+        let n = |k: &str, d: u64| v.get(k).and_then(|x| x.as_u64()).unwrap_or(d);
+        Ok(RouteJob {
+            id: s("id", &(i + 1).to_string()),
+            kind,
+            prompt: s("prompt", ""),
+            class: v
+                .get("class")
+                .and_then(|c| serde_json::from_value::<TaskClass>(c.clone()).ok()),
+            privacy: parse_privacy(&s("privacy", "private")),
+            verify: s("verify", "none"),
+            tests: v.get("tests").and_then(|x| x.as_str()).map(String::from),
+            width: n("width", 512) as u32,
+            height: n("height", 512) as u32,
+            steps: n("steps", 2) as u32,
+            seed: v.get("seed").and_then(|x| x.as_u64()),
+            file: v.get("file").and_then(|x| x.as_str()).map(String::from),
+            inputs: v
+                .get("inputs")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
     };
     if let Some(f) = flag_value(args, "--batch") {
         let Ok(text) = std::fs::read_to_string(&f) else {
@@ -586,37 +735,16 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         };
         for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
-                eprintln!("error: batch line {} is not JSON", i + 1);
-                return ExitCode::from(2);
-            };
-            let class = v
-                .get("class")
-                .and_then(|c| serde_json::from_value::<TaskClass>(c.clone()).ok());
-            reqs.push(RouteJob {
-                id: v
-                    .get("id")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("?")
-                    .to_string(),
-                prompt: v
-                    .get("prompt")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                class,
-                privacy: parse_privacy(
-                    v.get("privacy")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("private"),
-                ),
-                verify: v
-                    .get("verify")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("none")
-                    .to_string(),
-                tests: v.get("tests").and_then(|x| x.as_str()).map(String::from),
-            });
+            let parsed = serde_json::from_str::<Value>(line)
+                .map_err(|e| e.to_string())
+                .and_then(|v| from_json(i, &v));
+            match parsed {
+                Ok(j) => reqs.push(j),
+                Err(e) => {
+                    eprintln!("error: batch line {}: {e}", i + 1);
+                    return ExitCode::from(2);
+                }
+            }
         }
     } else {
         let prompt = match (
@@ -630,86 +758,314 @@ async fn cmd_route_async(args: &[String]) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-        let class = flag_value(args, "--class")
-            .and_then(|c| serde_json::from_value::<TaskClass>(Value::String(c)).ok());
-        let tests = flag_value(args, "--tests-file").and_then(|f| std::fs::read_to_string(f).ok());
-        reqs.push(RouteJob {
-            id: "1".into(),
-            prompt,
-            class,
-            privacy: parse_privacy(&flag_value(args, "--privacy").unwrap_or_default()),
-            verify: flag_value(args, "--verify").unwrap_or_else(|| "none".into()),
-            tests,
-        });
+        let v = json!({"prompt": prompt, "class": flag_value(args, "--class"), "privacy": flag_value(args, "--privacy"),
+                       "verify": flag_value(args, "--verify"), "kind": flag_value(args, "--kind")});
+        let mut v = v.as_object().cloned().unwrap_or_default();
+        v.retain(|_, x| !x.is_null());
+        let mut job = match from_json(0, &Value::Object(v)) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        job.tests = flag_value(args, "--tests-file").and_then(|f| std::fs::read_to_string(f).ok());
+        reqs.push(job);
     }
 
+    // Tiers. Constructing the backends only reads catalogs: models load on first use, so --explain loads nothing.
+    let catalog_path = flag_value(args, "--catalog").unwrap_or_else(default_catalog_path);
+    let device = device_flag(args);
+    let mut local: Vec<TierBackend> = Vec::new();
+    if let Some(m) = flag_value(args, "--local-model") {
+        match CandleInferenceService::with_device(&catalog_path, device) {
+            Ok(svc) => {
+                if !explain {
+                    if let Err(e) = svc.load_model(&m).await {
+                        eprintln!("error: failed to load model '{m}': {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                local.push(TierBackend::new(
+                    Arc::new(TextService::new(Arc::new(svc))),
+                    &[(RequestKind::TextGeneration, &m)],
+                ));
+            }
+            Err(e) => {
+                eprintln!("error: failed to load catalog {catalog_path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if let Some(m) = flag_value(args, "--image-model") {
+        let m = match resolve_model(Some(m), RequestKind::ImageGeneration, &catalog_path, args) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        match CandleImageService::new(&catalog_path, device) {
+            Ok(svc) => local.push(TierBackend::new(
+                Arc::new(svc),
+                &[(RequestKind::ImageGeneration, &m)],
+            )),
+            Err(e) => {
+                eprintln!("error: image catalog: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if let Some(m) = flag_value(args, "--embed-model") {
+        match CandleEmbeddingService::new(&catalog_path, device) {
+            Ok(svc) => local.push(TierBackend::new(
+                Arc::new(svc),
+                &[(RequestKind::Embedding, &m)],
+            )),
+            Err(e) => {
+                eprintln!("error: embedding catalog: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let cloud: Vec<TierBackend> = cloud_cmd
+        .map(|c| {
+            let name = flag_value(args, "--cloud-model").unwrap_or_else(|| "cloud".into());
+            vec![TierBackend::new(
+                Arc::new(TextService::new(Arc::new(CommandCloud { cmd: c }))),
+                &[(RequestKind::TextGeneration, &name)],
+            )]
+        })
+        .unwrap_or_default();
+    // The CLI is a trusted in-process caller (no boundary, so no grant set): free-text image requests may be re-typed.
+    let mut svc = MultiHybridService::new(local, cloud, policy);
+    if !args.iter().any(|a| a == "--no-retype") {
+        svc = svc.with_retyping();
+    }
+
+    let routed = |job: &RouteJob| -> Result<RoutedRequest, String> {
+        let mut r = RoutedRequest::new(job_request(job)?);
+        r.class = job.class;
+        r.privacy = job.privacy;
+        r.check = check_for(job);
+        Ok(r)
+    };
     if explain {
-        let router = Router::new(policy);
         for job in &reqs {
-            let class = job.class.unwrap_or_else(|| ai_kit::classify(&job.prompt));
-            let d = router.decide(
-                class,
-                job.privacy,
-                job.prompt.chars().count() as u32 / 4 + 1,
-                cloud_cmd.is_some(),
-                !matches!(
-                    verifier_from(&job.verify, job.tests.as_deref()),
-                    ai_kit::Verifier::None
-                ),
-            );
-            println!("{}", json!({"id": job.id, "decision": d}));
+            match routed(job) {
+                Ok(r) => println!("{}", json!({"id": job.id, "decision": svc.explain(&r)})),
+                Err(e) => println!("{}", json!({"id": job.id, "ok": false, "error": e})),
+            }
         }
         return ExitCode::SUCCESS;
     }
+    let _ = max_tokens;
+    std::fs::create_dir_all(&out_dir).ok();
+    for job in &reqs {
+        let r = match routed(job) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("{}", json!({"id": job.id, "ok": false, "error": e}));
+                continue;
+            }
+        };
+        match svc.handle_routed(r).await {
+            Ok((out, trace)) => {
+                let body = match out {
+                    Output::Text(t) => json!({"kind": "text", "completion": t.completion}),
+                    Output::Image(i) => {
+                        let file = format!("{out_dir}/{}.png", job.id);
+                        let _ = std::fs::write(&file, &i.png);
+                        json!({"kind": "image", "file": file, "width": i.width, "height": i.height, "seed": i.seed,
+                               "steps": i.steps, "pixel_stddev": i.pixel_stddev, "inference_ms": i.inference_ms})
+                    }
+                    Output::Embeddings(e) => {
+                        json!({"kind": "embeddings", "count": e.vectors.len(), "dimensions": e.dimensions,
+                        "head": e.vectors.first().map(|v| v.iter().take(4).collect::<Vec<_>>()), "inference_ms": e.inference_ms})
+                    }
+                    Output::Transcript(t) => json!({"kind": "transcript", "text": t.text}),
+                    _ => json!({"kind": "unknown", "note": "output kind newer than this CLI"}),
+                };
+                println!(
+                    "{}",
+                    json!({"id": job.id, "ok": true, "output": body, "trace": trace})
+                );
+            }
+            Err(e) => println!(
+                "{}",
+                json!({"id": job.id, "ok": false, "error": e.to_string()})
+            ),
+        }
+    }
+    eprintln!("{}", json!({"stats": svc.route_stats()}));
+    ExitCode::SUCCESS
+}
 
+// ------------------------------------------------------------------ imagine / embed
+
+#[cfg(not(feature = "candle"))]
+fn cmd_imagine(_args: &[String]) -> ExitCode {
+    eprintln!("ai-kit-cli was built without the `candle` feature, so `imagine` is unavailable.");
+    ExitCode::from(2)
+}
+#[cfg(not(feature = "candle"))]
+fn cmd_embed(_args: &[String]) -> ExitCode {
+    eprintln!("ai-kit-cli was built without the `candle` feature, so `embed` is unavailable.");
+    ExitCode::from(2)
+}
+
+/// Resolve a model flag: a concrete id is used as is; `default` (or no flag, where allowed) picks the catalog's default for
+/// `kind` by the registry's rule: never a non-commercial model unless `--allow-noncommercial` is given.
+#[cfg(feature = "candle")]
+fn resolve_model(
+    given: Option<String>,
+    kind: ai_kit::RequestKind,
+    catalog_path: &str,
+    args: &[String],
+) -> Result<String, String> {
+    if let Some(id) = given.filter(|g| g != "default") {
+        return Ok(id);
+    }
+    let reg = ai_kit::registry::ModelRegistry::load_from_file(catalog_path)
+        .map_err(|e| format!("failed to load catalog {catalog_path}: {e}"))?;
+    let allow = args.iter().any(|a| a == "--allow-noncommercial");
+    reg.default_for(kind, allow).map(|m| m.id.clone()).ok_or_else(|| {
+        format!(
+            "no commercially usable {} model in {catalog_path} (pass --allow-noncommercial to use a development-only model)",
+            kind.as_str()
+        )
+    })
+}
+
+#[cfg(feature = "candle")]
+fn cmd_imagine(args: &[String]) -> ExitCode {
+    use ai_kit::{CandleImageService, ImageGenParams, Output, Request, RequestService};
+    let (Some(prompt), Some(out)) = (flag_value(args, "--prompt"), flag_value(args, "--out"))
+    else {
+        eprintln!(
+            "error: imagine needs --prompt and --out (and --model, or the catalog's default)"
+        );
+        return ExitCode::from(2);
+    };
     let catalog_path = flag_value(args, "--catalog").unwrap_or_else(default_catalog_path);
-    let local_model = flag_value(args, "--local-model").unwrap_or_else(|| "probe".into());
-    let device = flag_value(args, "--device")
-        .or_else(|| env::var("AI_KIT_DEVICE").ok())
-        .and_then(|v| v.parse::<DevicePreference>().ok())
-        .unwrap_or_default();
-    let local = match CandleInferenceService::with_device(&catalog_path, device) {
+    let model = match resolve_model(
+        flag_value(args, "--model"),
+        ai_kit::RequestKind::ImageGeneration,
+        &catalog_path,
+        args,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let svc = match CandleImageService::new(&catalog_path, device_flag(args)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: failed to load catalog {catalog_path}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = local.load_model(&local_model).await {
-        eprintln!("error: failed to load model '{local_model}': {e}");
-        return ExitCode::FAILURE;
-    }
-    let cloud: Option<(Arc<dyn InferenceService>, String)> = cloud_cmd.map(|c| {
-        (
-            Arc::new(CommandCloud { cmd: c }) as Arc<dyn InferenceService>,
-            flag_value(args, "--cloud-model").unwrap_or_else(|| "cloud".into()),
-        )
-    });
-    let hybrid = HybridInferenceService::new(Arc::new(local), local_model, cloud, policy);
-
-    for job in reqs {
-        let (id, class, privacy) = (job.id, job.class, job.privacy);
-        let mut r = RouteRequest::new(InferenceParams {
-            model_id: String::new(),
-            prompt: job.prompt,
-            temperature: 0.0,
-            top_p: 1.0,
-            max_tokens,
-            session_id: None,
-            preferred_quantization: None,
-            request_id: None,
-        });
-        r.class = class;
-        r.privacy = privacy;
-        r.verifier = verifier_from(&job.verify, job.tests.as_deref());
-        match hybrid.infer_routed(r).await {
-            Ok((resp, trace)) => println!(
+    let mut p = ImageGenParams::new(model, prompt);
+    let num = |k: &str| flag_value(args, k).and_then(|v| v.parse::<u32>().ok());
+    p.width = num("--width").unwrap_or(p.width);
+    p.height = num("--height").unwrap_or(p.height);
+    p.steps = num("--steps").unwrap_or(p.steps);
+    p.seed = flag_value(args, "--seed").and_then(|v| v.parse().ok());
+    p.guidance_scale = flag_value(args, "--guidance")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    p.negative_prompt = flag_value(args, "--negative");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let t = std::time::Instant::now();
+    match rt.block_on(svc.handle(Request::ImageGeneration(p))) {
+        Ok(Output::Image(i)) => {
+            if let Err(e) = std::fs::write(&out, &i.png) {
+                eprintln!("error: cannot write {out}: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!(
                 "{}",
-                json!({"id": id, "ok": true, "completion": resp.completion, "trace": trace})
-            ),
-            Err(e) => println!("{}", json!({"id": id, "ok": false, "error": e.to_string()})),
+                serde_json::json!({"file": out, "width": i.width, "height": i.height, "seed": i.seed, "steps": i.steps,
+                    "pixel_stddev": i.pixel_stddev, "generate_ms": i.inference_ms, "total_ms": t.elapsed().as_millis() as u64})
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
         }
     }
-    eprintln!("{}", json!({"stats": hybrid.route_stats()}));
-    ExitCode::SUCCESS
+}
+
+#[cfg(feature = "candle")]
+fn cmd_embed(args: &[String]) -> ExitCode {
+    use ai_kit::{CandleEmbeddingService, EmbeddingParams, Output, Request, RequestService};
+    let Some(model) = flag_value(args, "--model") else {
+        eprintln!("error: embed needs --model and one or more --text");
+        return ExitCode::from(2);
+    };
+    let texts: Vec<String> = args
+        .windows(2)
+        .filter(|w| w[0] == "--text")
+        .map(|w| w[1].clone())
+        .collect();
+    let query = flag_value(args, "--query");
+    let mut inputs = texts.clone();
+    if let Some(q) = &query {
+        inputs.push(q.clone());
+    }
+    if inputs.is_empty() {
+        eprintln!("error: embed needs at least one --text");
+        return ExitCode::from(2);
+    }
+    let catalog_path = flag_value(args, "--catalog").unwrap_or_else(default_catalog_path);
+    let svc = match CandleEmbeddingService::new(&catalog_path, device_flag(args)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: failed to load catalog {catalog_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let req = Request::Embedding(EmbeddingParams {
+        model_id: model,
+        inputs,
+        normalize: true,
+        session_id: None,
+        request_id: None,
+    });
+    match rt.block_on(svc.handle(req)) {
+        Ok(Output::Embeddings(e)) => {
+            let mut result = serde_json::json!({"count": e.vectors.len(), "dimensions": e.dimensions, "inference_ms": e.inference_ms});
+            if query.is_some() {
+                let q = e.vectors.last().cloned().unwrap_or_default();
+                let mut ranked: Vec<(f32, &String)> = texts
+                    .iter()
+                    .zip(&e.vectors)
+                    .map(|(t, v)| (v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>(), t))
+                    .collect();
+                ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+                result["ranked"] = serde_json::json!(ranked
+                    .iter()
+                    .map(|(s, t)| serde_json::json!({"score": s, "text": t}))
+                    .collect::<Vec<_>>());
+            }
+            println!("{result}");
+            ExitCode::SUCCESS
+        }
+        Ok(_) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

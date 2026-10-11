@@ -21,8 +21,8 @@
 //!    not as the first choice, not as an escalation, not as a fallback after a local
 //!    error. If a private local answer fails verification it is returned with a note
 //!    saying so; it is not silently upgraded.
-//! 2. **Capability.** Raster image generation is not text-in/text-out, so it is
-//!    [`Plan::Delegate`]d (the caller must use an image capability; Inference Kit has
+//! 2. **RequestKind.** Raster image generation is not text-in/text-out, so it is
+//!    [`Plan::Delegate`]d (the caller must use an image request kind; Inference Kit has
 //!    none). Vector graphics (SVG) *are* text and are routed like code.
 //! 3. **Fit.** A prompt longer than the local model's context goes to the cloud when
 //!    allowed (and runs locally, with a note, when not).
@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex};
 /// What kind of work a prompt is. Drives the policy table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TaskClass {
     /// Pick one label from a small set.
     Classify,
@@ -68,8 +69,15 @@ pub enum TaskClass {
     Reason,
     /// Vector graphics as SVG source (text out, so it can run on either tier).
     Svg,
-    /// Raster images (photo, painting). Not text; delegated.
+    /// Raster images (photo, painting). Not text; the text-only [`HybridInferenceService`] delegates them,
+    /// [`crate::routed::MultiHybridService`] runs them on a backend that has the request kind.
     ImageRaster,
+    /// A question about a given image.
+    ImageUnderstanding,
+    /// Turn texts into vectors.
+    Embedding,
+    /// Transcribe audio.
+    SpeechToText,
     /// Anything else.
     Other,
 }
@@ -213,8 +221,16 @@ impl RouteRequest {
 pub enum Plan {
     /// Run on `first`; if `escalate`, retry on the cloud when verification fails (or the local call errors).
     Run { first: Tier, escalate: bool },
-    /// Not something this service can run; the caller must use `capability`.
-    Delegate { capability: String },
+    /// Not something this service can run; the caller must use `request kind`.
+    Delegate { request_kind: String },
+    /// No configured tier can serve this request, or none this content is allowed to reach.
+    Unavailable {
+        request_kind: String,
+        reason: String,
+        /// True when the only tier that could serve it is the cloud and the content is private (wire code `RequiresShareable`).
+        #[serde(default)]
+        needs_shareable: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -344,7 +360,7 @@ impl Router {
             reasons.push("raster images are not text-in/text-out".to_string());
             return done(
                 Plan::Delegate {
-                    capability: "image_generation".to_string(),
+                    request_kind: "image_generation".to_string(),
                 },
                 reasons,
             );
@@ -402,6 +418,109 @@ impl Router {
     }
 }
 
+impl Router {
+    /// RequestKind-aware decision for any kind of request.
+    ///
+    /// `local_has` / `cloud_has` say whether each tier has a backend for `cap`. The rules:
+    /// nobody has it -> `Unavailable`; only the cloud has it -> cloud if the content may go, otherwise
+    /// `Unavailable` (we do not silently use a different kind of model, and we do not leak private content to get an answer);
+    /// only local has it -> local; both -> the same text policy as [`Router::decide`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn decide_multi(
+        &self,
+        cap: crate::modality::RequestKind,
+        class: TaskClass,
+        privacy: Privacy,
+        prompt_tokens: u32,
+        local_has: bool,
+        cloud_has: bool,
+        has_verifier: bool,
+    ) -> Decision {
+        let cap_s = cap.as_str().to_string();
+        let mut reasons = Vec::new();
+        let done = |plan, reasons| Decision {
+            class,
+            plan,
+            reasons,
+        };
+        let cloud_ok = cloud_has && privacy == Privacy::Shareable;
+        match (local_has, cloud_has) {
+            (false, false) => {
+                reasons.push("no configured backend provides this request kind".to_string());
+                done(
+                    Plan::Unavailable {
+                        request_kind: cap_s,
+                        reason: "no configured backend provides it".to_string(),
+                        needs_shareable: false,
+                    },
+                    reasons,
+                )
+            }
+            (false, true) if !cloud_ok => {
+                reasons.push("only the cloud tier provides this request kind".to_string());
+                reasons.push("privacy=private: content never leaves the device".to_string());
+                done(
+                    Plan::Unavailable {
+                        request_kind: cap_s,
+                        reason: "only the cloud tier provides it and the content is private"
+                            .to_string(),
+                        needs_shareable: true,
+                    },
+                    reasons,
+                )
+            }
+            (false, true) => {
+                reasons.push("only the cloud tier provides this request kind".to_string());
+                done(
+                    Plan::Run {
+                        first: Tier::Cloud,
+                        escalate: false,
+                    },
+                    reasons,
+                )
+            }
+            (true, false) => {
+                reasons.push("only the local tier provides this request kind".to_string());
+                done(
+                    Plan::Run {
+                        first: Tier::Local,
+                        escalate: false,
+                    },
+                    reasons,
+                )
+            }
+            (true, true) => {
+                if cap == crate::modality::RequestKind::TextGeneration {
+                    // Both tiers have text: the original policy (privacy gate, fit, class table).
+                    return self.decide(class, privacy, prompt_tokens, true, has_verifier);
+                }
+                if !cloud_ok {
+                    reasons.push("privacy=private: content never leaves the device".to_string());
+                    return done(
+                        Plan::Run {
+                            first: Tier::Local,
+                            escalate: false,
+                        },
+                        reasons,
+                    );
+                }
+                let cp = self.policy.for_class(class);
+                reasons.push(format!(
+                    "both tiers have {cap_s}; policy for {class:?}: first={:?}, cascade={}",
+                    cp.first, cp.cascade
+                ));
+                done(
+                    Plan::Run {
+                        first: cp.first,
+                        escalate: cp.first == Tier::Local && cp.cascade && has_verifier,
+                    },
+                    reasons,
+                )
+            }
+        }
+    }
+}
+
 /// One tier call within a routed request.
 #[derive(Debug, Clone, Serialize)]
 pub struct Attempt {
@@ -434,6 +553,8 @@ pub struct RouteStats {
     pub blocked_by_privacy: u64,
     pub cloud_prompt_tokens: u64,
     pub cloud_completion_tokens: u64,
+    /// Bytes of request content sent to a cloud tier (text, images, audio), whatever the kind. Set by `MultiHybridService`.
+    pub cloud_payload_bytes: u64,
 }
 
 /// A local service, an optional cloud one, and the router between them.
@@ -564,12 +685,22 @@ impl HybridInferenceService {
             notes: Vec::new(),
         };
         let (first, escalate) = match decision.plan {
-            Plan::Delegate { ref capability } => {
+            Plan::Delegate { ref request_kind } => {
                 return Err(AiKitError::InvalidParams {
                     reason: format!(
-                        "this request needs the '{capability}' capability, which InferenceService (text in, text out) does not provide"
+                        "this request needs the '{request_kind}' request kind, which InferenceService (text in, text out) does not provide"
                     ),
                 })
+            }
+            Plan::Unavailable {
+                ref request_kind,
+                ref reason,
+                ..
+            } => {
+                return Err(crate::modality::unsupported(
+                    request_kind.parse().unwrap_or(crate::modality::RequestKind::TextGeneration),
+                    reason.clone(),
+                ))
             }
             Plan::Run { first, escalate } => (first, escalate),
         };

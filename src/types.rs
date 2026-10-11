@@ -119,6 +119,78 @@ pub struct ModelMetadata {
 
     /// Extended metadata.
     pub metadata: ModelMetadataExtended,
+
+    /// Further files of a multi-file model (an image model is a UNet, a VAE, a text encoder and a tokenizer;
+    /// the main file above is the largest). Each is hash-verified on load, like the main file.
+    #[serde(default)]
+    pub files: Vec<ModelFile>,
+}
+
+/// One extra file of a model, addressed by role (`vae`, `text_encoder`, `tokenizer`, `config`, ...).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelFile {
+    pub role: String,
+    pub location: String,
+    /// BLAKE3 hex digest.
+    pub hash: String,
+    pub size_bytes: u64,
+}
+
+/// What a model's licence allows, from `metadata.custom["license"]`. Only used to keep non-commercial models from becoming a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LicenceClass {
+    /// Permits commercial use (for example Apache-2.0, MIT).
+    Commercial,
+    /// Development or research only (`non-commercial...`, `research...`).
+    NonCommercial,
+    /// Not stated. Treated as usable; a catalog author who knows better must say so.
+    Unknown,
+}
+
+impl ModelMetadata {
+    /// Commercial / non-commercial / unknown, from `custom.license`.
+    pub fn licence_class(&self) -> LicenceClass {
+        match self
+            .metadata
+            .custom
+            .get("license")
+            .map(|l| l.trim().to_ascii_lowercase())
+        {
+            None => LicenceClass::Unknown,
+            Some(l)
+                if l.starts_with("non-commercial")
+                    || l.starts_with("noncommercial")
+                    || l.starts_with("research") =>
+            {
+                LicenceClass::NonCommercial
+            }
+            Some(_) => LicenceClass::Commercial,
+        }
+    }
+
+    /// Which kind of work this model does (`metadata.custom["kind"]`; absent means text generation).
+    pub fn kind(&self) -> crate::modality::RequestKind {
+        self.metadata
+            .custom
+            .get("kind")
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(crate::modality::RequestKind::TextGeneration)
+    }
+
+    /// Main file plus every extra file, in bytes.
+    pub fn total_size_bytes(&self) -> u64 {
+        self.size_bytes + self.files.iter().map(|f| f.size_bytes).sum::<u64>()
+    }
+
+    /// Path of the extra file with this role (`file://` stripped).
+    pub fn file_path(&self, role: &str) -> Option<String> {
+        self.files.iter().find(|f| f.role == role).map(|f| {
+            f.location
+                .strip_prefix("file://")
+                .unwrap_or(&f.location)
+                .to_string()
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
