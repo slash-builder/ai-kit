@@ -26,6 +26,7 @@
 //! on the CPU. With `steps = 1` (no extra noise) the same seed gives the same image everywhere. No img2img, inpainting or LoRA. One request at a time per model.
 
 use crate::backends::common::{check_vram, device_for, verify_model_files, DevicePreference};
+use crate::backends::zimage::{ZImageFiles, ZImagePipeline};
 use crate::error::{AiKitError, Result};
 use crate::modality::{
     unsupported, GeneratedImage, ImageGenParams, Output, Request, RequestKind, RequestService,
@@ -61,10 +62,20 @@ struct LoadedImageModel {
     version: String,
 }
 
+/// One loaded image model, by architecture.
+enum LoadedImage {
+    SdTurbo(Box<LoadedImageModel>),
+    /// Z-Image-Turbo loads its (large) weights per request, so loading it only records where the files are.
+    ZImage {
+        pipeline: ZImagePipeline,
+        version: String,
+    },
+}
+
 pub struct CandleImageService {
     registry: ModelRegistry,
     device_pref: DevicePreference,
-    loaded: RwLock<HashMap<String, Arc<Mutex<LoadedImageModel>>>>,
+    loaded: RwLock<HashMap<String, Arc<Mutex<LoadedImage>>>>,
 }
 
 impl CandleImageService {
@@ -116,9 +127,9 @@ impl CandleImageService {
             .custom
             .get("architecture")
             .map_or("sd_turbo", String::as_str);
-        if arch != "sd_turbo" {
+        if !matches!(arch, "sd_turbo" | "z_image") {
             return Err(fail(format!(
-                "unsupported image architecture '{arch}' (this backend runs: sd_turbo)"
+                "unsupported image architecture '{arch}' (this backend runs: sd_turbo, z_image)"
             )));
         }
         let (device, _label) = device_for(self.device_pref).map_err(fail)?;
@@ -129,6 +140,37 @@ impl CandleImageService {
                 .file_path(role)
                 .ok_or_else(|| fail(format!("catalog entry has no '{role}' file")))
         };
+        if arch == "z_image" {
+            let mut shards: Vec<_> = model
+                .files
+                .iter()
+                .filter(|f| f.role.starts_with("text_encoder"))
+                .collect();
+            shards.sort_by(|a, b| a.role.cmp(&b.role));
+            if shards.is_empty() {
+                return Err(fail("catalog entry has no 'text_encoder*' files".into()));
+            }
+            let strip = |l: &str| l.strip_prefix("file://").unwrap_or(l).to_string();
+            let files = ZImageFiles {
+                gguf: unet_path,
+                text_encoder_shards: shards.iter().map(|f| strip(&f.location)).collect(),
+                vae: need("vae")?,
+                tokenizer: need("tokenizer")?,
+            };
+            self.loaded
+                .write()
+                .map_err(|_| AiKitError::Internal {
+                    reason: "loaded-model lock poisoned".into(),
+                })?
+                .insert(
+                    id.to_string(),
+                    Arc::new(Mutex::new(LoadedImage::ZImage {
+                        pipeline: ZImagePipeline::new(files, device),
+                        version: model.version.clone(),
+                    })),
+                );
+            return Ok(());
+        }
         let (vae_path, clip_path, tok_path) =
             (need("vae")?, need("text_encoder")?, need("tokenizer")?);
 
@@ -157,16 +199,18 @@ impl CandleImageService {
             })?
             .insert(
                 id.to_string(),
-                Arc::new(Mutex::new(LoadedImageModel {
-                    clip,
-                    clip_cfg,
-                    unet,
-                    vae,
-                    tokenizer,
-                    device,
-                    dtype,
-                    version: model.version.clone(),
-                })),
+                Arc::new(Mutex::new(LoadedImage::SdTurbo(Box::new(
+                    LoadedImageModel {
+                        clip,
+                        clip_cfg,
+                        unet,
+                        vae,
+                        tokenizer,
+                        device,
+                        dtype,
+                        version: model.version.clone(),
+                    },
+                )))),
             );
         Ok(())
     }
@@ -185,11 +229,18 @@ impl CandleImageService {
             .ok_or_else(|| AiKitError::ModelNotFound {
                 model_id: p.model_id.clone(),
             })?;
-        let m = model.lock().map_err(|_| AiKitError::Internal {
+        let loaded = model.lock().map_err(|_| AiKitError::Internal {
             reason: "image model lock poisoned".into(),
         })?;
         let started = std::time::Instant::now();
         let seed = p.seed.unwrap_or_else(fresh_seed);
+        let m = match &*loaded {
+            LoadedImage::SdTurbo(m) => m,
+            LoadedImage::ZImage { pipeline, version } => {
+                let rgb = pipeline.generate(p, seed, None)?;
+                return finish_image(rgb, p, seed, started, version);
+            }
+        };
         // The Euler-ancestral sampler draws fresh noise on every step but the last, from Candle's own RNG. That RNG can only be
         // seeded on CUDA, so seed it there (on the CPU only `steps = 1`, which draws none, is reproducible).
         if m.device.is_cuda() {
@@ -203,9 +254,9 @@ impl CandleImageService {
 
         let (h, w) = (p.height as usize, p.width as usize);
         let use_guide = p.guidance_scale > 1.0;
-        let cond = encode_prompt(&m, &p.prompt).map_err(|e| internal("prompt", e))?;
+        let cond = encode_prompt(m, &p.prompt).map_err(|e| internal("prompt", e))?;
         let text_embeddings = if use_guide {
-            let uncond = encode_prompt(&m, p.negative_prompt.as_deref().unwrap_or(""))
+            let uncond = encode_prompt(m, p.negative_prompt.as_deref().unwrap_or(""))
                 .map_err(|e| internal("negative prompt", e))?;
             Tensor::cat(&[&uncond, &cond], 0).map_err(|e| internal("embeddings", e))?
         } else {
@@ -248,7 +299,7 @@ impl CandleImageService {
             latents = step.map_err(|e| internal("denoising step", e))?;
         }
 
-        let rgb = (|| -> candle_core::Result<(Vec<u8>, f32)> {
+        let rgb = (|| -> candle_core::Result<Vec<u8>> {
             let img = m.vae.decode(&(&latents / VAE_SCALE)?)?;
             let img = ((img.to_dtype(DType::F32)? / 2.)? + 0.5)?;
             let img = (img.clamp(0f32, 1f32)? * 255.)?
@@ -257,34 +308,43 @@ impl CandleImageService {
                 .i(0)?
                 .permute((1, 2, 0))?
                 .contiguous()?;
-            let bytes = img.flatten_all()?.to_vec1::<u8>()?;
-            let n = bytes.len() as f32;
-            let mean = bytes.iter().map(|b| f32::from(*b)).sum::<f32>() / n;
-            let var = bytes
-                .iter()
-                .map(|b| (f32::from(*b) - mean).powi(2))
-                .sum::<f32>()
-                / n;
-            Ok((bytes, var.sqrt()))
+            img.flatten_all()?.to_vec1::<u8>()
         })()
         .map_err(|e| internal("decode", e))?;
-
-        Ok(GeneratedImage {
-            png: encode_png(&rgb.0, p.width, p.height)?,
-            width: p.width,
-            height: p.height,
-            seed,
-            steps: p.steps,
-            pixel_stddev: rgb.1,
-            inference_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
-            model_version: m.version.clone(),
-            session_id: p.session_id.clone().unwrap_or_default(),
-            request_id: p
-                .request_id
-                .clone()
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        })
+        finish_image(rgb, p, seed, started, &m.version)
     }
+}
+
+/// RGB bytes -> the response (PNG, pixel spread for the sanity check, timing and ids). Shared by every architecture.
+fn finish_image(
+    rgb: Vec<u8>,
+    p: &ImageGenParams,
+    seed: u64,
+    started: std::time::Instant,
+    version: &str,
+) -> Result<GeneratedImage> {
+    let n = rgb.len() as f32;
+    let mean = rgb.iter().map(|b| f32::from(*b)).sum::<f32>() / n;
+    let var = rgb
+        .iter()
+        .map(|b| (f32::from(*b) - mean).powi(2))
+        .sum::<f32>()
+        / n;
+    Ok(GeneratedImage {
+        png: encode_png(&rgb, p.width, p.height)?,
+        width: p.width,
+        height: p.height,
+        seed,
+        steps: p.steps,
+        pixel_stddev: var.sqrt(),
+        inference_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+        model_version: version.to_string(),
+        session_id: p.session_id.clone().unwrap_or_default(),
+        request_id: p
+            .request_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    })
 }
 
 #[async_trait]
@@ -333,7 +393,7 @@ fn encode_prompt(m: &LoadedImageModel, prompt: &str) -> candle_core::Result<Tens
 }
 
 /// splitmix64 + Box-Muller: deterministic, identical on every device (Candle can only seed the CUDA RNG).
-fn seeded_normal(seed: u64, n: usize) -> Vec<f32> {
+pub(crate) fn seeded_normal(seed: u64, n: usize) -> Vec<f32> {
     let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
     let mut next = move || {
         state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -361,7 +421,12 @@ fn fresh_seed() -> u64 {
     t ^ u64::from(std::process::id()).rotate_left(32)
 }
 
-fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+#[cfg(test)]
+pub(crate) fn encode_png_for_tests(rgb: &[u8], width: u32, height: u32) -> Vec<u8> {
+    encode_png(rgb, width, height).unwrap()
+}
+
+pub(crate) fn encode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(rgb.len() / 2);
     {
         let mut enc = png::Encoder::new(&mut out, width, height);

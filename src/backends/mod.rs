@@ -25,6 +25,8 @@ pub use common::{describe_cuda_devices, DevicePreference};
 pub mod diffusion;
 #[cfg(feature = "candle")]
 pub mod embedding;
+#[cfg(feature = "candle")]
+pub(crate) mod zimage;
 
 #[cfg(feature = "candle")]
 pub use diffusion::CandleImageService;

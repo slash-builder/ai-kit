@@ -126,6 +126,16 @@ pub(crate) fn cuda_device(ordinal: usize) -> std::result::Result<(Device, String
 // (and unit-tested) in every build rather than hidden behind the feature.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 fn vram_needed_mb(model: &ModelMetadata) -> u64 {
+    // A model that streams its weights (Z-Image) never holds them all at once, so the sum of its file sizes overstates what it
+    // needs. Its catalog entry declares the measured peak in `custom.vram_peak_mb`, which replaces the file-size estimate.
+    if let Some(peak) = model
+        .metadata
+        .custom
+        .get("vram_peak_mb")
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return peak.max(u64::from(model.metadata.vram_required_mb));
+    }
     let weights_mb = model.total_size_bytes().div_ceil(1 << 20);
     let overhead =
         ((weights_mb as f64 * VRAM_OVERHEAD_FRACTION) as u64).max(VRAM_OVERHEAD_FLOOR_MB);
@@ -240,6 +250,17 @@ mod tests {
     fn vram_estimate_has_a_floor_for_small_models() {
         // 100 MB of weights: 15% = 15 MB, so the 384 MB floor applies.
         assert_eq!(vram_needed_mb(&model(100 << 20, 1)), 100 + 384);
+    }
+
+    #[test]
+    fn a_streaming_model_declares_its_measured_peak_instead_of_its_file_sizes() {
+        let mut m = model(12_000 << 20, 1);
+        m.metadata
+            .custom
+            .insert("vram_peak_mb".to_string(), "8500".to_string());
+        assert_eq!(vram_needed_mb(&m), 8500);
+        m.metadata.vram_required_mb = 9000; // the declared floor still wins if it is higher
+        assert_eq!(vram_needed_mb(&m), 9000);
     }
 
     #[test]
