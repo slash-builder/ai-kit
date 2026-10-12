@@ -3,6 +3,27 @@
 // decoupled from the Jenkins agent host. Pinned to latest stable as of 2026-06.
 def RUST_IMAGE = 'rust:1.94'
 
+// Run `body` on an agent with `label`, as an optional leg (see the comment above the legs).
+//   - No online agent with the label: skip the leg, mark the build UNSTABLE.
+//   - The leg fails or times out: mark the build UNSTABLE, do not fail it.
+// Never use this for the linux legs: those are the gate.
+def optionalLeg(String name, String label, int minutes, Closure body) {
+  if (nodesByLabel(label: label).isEmpty()) {
+    unstable("${name}: no online '${label}' agent, leg skipped")
+    return
+  }
+  try {
+    timeout(time: minutes, unit: 'MINUTES') {
+      node(label) {
+        checkout scm
+        body()
+      }
+    }
+  } catch (err) {
+    unstable("${name}: ${err.getMessage()}")
+  }
+}
+
 pipeline {
   // Pinned (not `any`): Build & Test and Publish both run a docker { reuseNode true }
   // sub-agent, which reuses whatever node this top-level agent lands on. `agent any`
@@ -117,49 +138,44 @@ pipeline {
           }
         }
 
+        // The Windows and macOS legs run on agents this repo does not control (mars, saturn), and
+        // they come and go. They are verification, not a release gate, so they must never block
+        // Publish. Two things used to:
+        //   1. catchError defaults to buildResult FAILURE, and a declarative pipeline does not run
+        //      later stages once the build is FAILURE -- so one failing leg skipped Publish.
+        //   2. A stage-level `agent { label 'saturn' }` waits for an agent with no limit, so an
+        //      offline saturn hung the whole build (and the PR check) until someone cancelled it.
+        // optionalLeg() fixes both: no online agent -> the leg is skipped and the build goes
+        // UNSTABLE (yellow, not red); a leg that runs and fails does the same. A leg that takes too
+        // long is stopped. Publish still runs on main, and the unstable result stays visible.
         stage('windows-amd64') {
-          // KNOWN BROKEN as of 2026-08-29: the win32 agent's `checkout scm` fails with
-          // a git auth error before any pipeline step runs — pre-existing, agent-level,
-          // affects every kit that builds on win32, not specific to ai-kit's Jenkinsfile.
-          // Out of scope to fix here (Sol/Jenkins agent config, not this repo). Wrapped in
-          // catchError so this leg's failure is visible per-stage but does not block the
-          // linux-amd64 leg or the Publish stage below — otherwise Nexus publishing would
-          // be silently blocked by infrastructure this repo doesn't control.
-          agent { label 'win32' }
           steps {
-            catchError(message: 'windows-amd64: known win32 checkout-scm/git-auth issue (agent-level, out of scope)', stageResult: 'FAILURE') {
-              bat '''
-                rustup component add rustfmt clippy
-                cargo fmt --check || exit /b 1
-                cargo clippy --all-targets -- -D warnings || exit /b 1
-                cargo test || exit /b 1
-                cargo build --release || exit /b 1
-              '''
+            script {
+              optionalLeg('windows-amd64', 'win32', 40) {
+                bat '''
+                  rustup component add rustfmt clippy
+                  cargo fmt --check || exit /b 1
+                  cargo clippy --all-targets -- -D warnings || exit /b 1
+                  cargo test || exit /b 1
+                  cargo build --release || exit /b 1
+                '''
+              }
             }
           }
         }
 
         stage('macos-arm64') {
-          // KNOWN BROKEN as of 2026-08-29, two independent issues, both agent-level and
-          // out of scope for this repo:
-          //   1. Same checkout-scm/git-auth failure as win32 — fails before any step runs.
-          //   2. No Rust toolchain on PATH on saturn even once checkout is fixed.
-          // saturn also has a separate, longer-standing history of flakiness/going offline;
-          // if a build hangs waiting for allocation here, that's a known infra issue too —
-          // the documented unblock is cancelling the stuck queue item via
-          // /queue/cancelItem?id=<id>, not debugging this stage. Wrapped in catchError for
-          // the same reason as windows-amd64: don't let known-broken agent infra silently
-          // block Nexus publish.
-          agent { label 'saturn' }
           steps {
-            catchError(message: 'macos-arm64: known saturn checkout-scm/toolchain issues (agent-level, out of scope)', stageResult: 'FAILURE') {
-              sh '''
-                rustup component add rustfmt clippy
-                cargo fmt --check
-                cargo clippy --all-targets -- -D warnings
-                cargo test
-                cargo build --release
-              '''
+            script {
+              optionalLeg('macos-arm64', 'saturn', 40) {
+                sh '''
+                  rustup component add rustfmt clippy
+                  cargo fmt --check
+                  cargo clippy --all-targets -- -D warnings
+                  cargo test
+                  cargo build --release
+                '''
+              }
             }
           }
         }
