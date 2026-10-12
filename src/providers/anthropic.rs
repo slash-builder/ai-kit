@@ -641,6 +641,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_daily_cap_below_the_worst_case_sends_nothing_even_with_a_large_total_budget() {
+        struct Fixed;
+        impl crate::budget::Clock for Fixed {
+            fn now(&self) -> u64 {
+                0
+            }
+        }
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body("end_turn", "x")))
+            .expect(0)
+            .mount(&s)
+            .await;
+        // $10 in total, but only 1,000 micro-dollars a day; the worst case for this call is well above 1,000
+        let ledger = Arc::new(Ledger::with_daily_cap(10_000_000, 1_000, Arc::new(Fixed)));
+        let mut cfg = AnthropicConfig::new("anthropic-api-key", "claude-test-model", PRICING);
+        cfg.base_url = s.uri();
+        let a = AnthropicAdapter::new(
+            cfg,
+            Arc::new(InMemoryCredentials::with("anthropic-api-key", KEY)),
+            ledger.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            a.call(&req("hello")).await.unwrap_err(),
+            ProviderError::BudgetExceeded
+        );
+        assert_eq!((ledger.available(), ledger.spent()), (1_000, 0));
+    }
+
+    #[tokio::test]
     async fn a_missing_credential_means_no_adapter_and_the_key_is_read_per_call() {
         let s = MockServer::start().await;
         let ledger = Arc::new(Ledger::new(1));
