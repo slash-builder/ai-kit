@@ -30,11 +30,14 @@ use super::{CredentialError, CredentialSource};
 use std::any::Any;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+/// Stores `value` under `name`, replacing what was there.
+pub type SetFn = Box<dyn Fn(&str, &str) + Send + Sync>;
+
 /// A source holding exactly the entries asked for, plus a way to change one (rotation).
 pub struct Setup {
     pub source: Box<dyn CredentialSource>,
     /// Store `value` under `name`, replacing what was there. The same source must see it on its next `get`.
-    pub set: Box<dyn Fn(&str, &str) + Send + Sync>,
+    pub set: SetFn,
     /// Anything that must outlive the check (a temp directory, a test keychain).
     pub guard: Box<dyn Any + Send>,
 }

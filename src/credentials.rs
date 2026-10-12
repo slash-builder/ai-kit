@@ -7,7 +7,7 @@
 //! `Display`, its `Debug` is redacted, and errors here carry the credential's *name*, never its content.
 
 pub mod conformance;
-pub use conformance::{assert_conforms, CredentialFixture, Setup};
+pub use conformance::{assert_conforms, CredentialFixture, SetFn, Setup};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -245,6 +245,8 @@ mod tests {
 
     // ---- the shared contract, run against the kit's own sources ----
 
+    type Shared = std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>;
+
     struct InMemoryFixture;
     impl CredentialFixture for InMemoryFixture {
         fn name(&self) -> &'static str {
@@ -252,13 +254,13 @@ mod tests {
         }
         fn setup(&self, entries: &[(&str, &str)]) -> Setup {
             use std::sync::{Arc, Mutex};
-            let store: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(
+            let store: Shared = Arc::new(Mutex::new(
                 entries
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
             ));
-            struct Live(Arc<Mutex<HashMap<String, String>>>);
+            struct Live(Shared);
             impl CredentialSource for Live {
                 fn get(&self, name: &str) -> Result<Secret, CredentialError> {
                     InMemoryCredentials(self.0.lock().unwrap().clone()).get(name)
@@ -327,18 +329,14 @@ mod tests {
         fn setup(&self, entries: &[(&str, &str)]) -> Setup {
             use std::sync::{Arc, Mutex};
             let kind = self.0;
-            let store: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(
+            let store: Shared = Arc::new(Mutex::new(
                 entries
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
             ));
-            let first_seen: Arc<Mutex<HashMap<String, String>>> = Arc::default();
-            struct Src(
-                Break,
-                Arc<Mutex<HashMap<String, String>>>,
-                Arc<Mutex<HashMap<String, String>>>,
-            );
+            let first_seen: Shared = Arc::default();
+            struct Src(Break, Shared, Shared);
             impl CredentialSource for Src {
                 fn get(&self, name: &str) -> Result<Secret, CredentialError> {
                     let kind = self.0;
