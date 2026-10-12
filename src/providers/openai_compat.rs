@@ -461,6 +461,7 @@ mod tests {
     use crate::credentials::InMemoryCredentials;
     use crate::egress::{AgeBand, Label, Policy, Purpose, SourceKind, Subject, VecSink};
     use crate::modality::EmbeddingParams;
+    use crate::model_card::ModelCard;
     use crate::provider::{run_chain, ChainConfig};
     use crate::types::InferenceParams;
     use wiremock::matchers::{body_partial_json, header, method, path};
@@ -919,5 +920,84 @@ mod tests {
             r.bytes_sent
         );
         assert!(out(&r).to_lowercase().contains("pong"), "{:?}", out(&r));
+    }
+
+    /// The whole stack, live: a real local Ollama and a (scripted) cloud provider behind the planner. Private content with no egress rule must be
+    /// answered locally, the cloud must never be called, and the plan must say why it was left out.
+    #[tokio::test]
+    #[ignore = "needs a running Ollama with the model installed"]
+    async fn live_private_content_is_answered_locally_through_the_planner_and_the_cloud_is_never_called(
+    ) {
+        use crate::egress::Locality;
+        use crate::planner::{Entry, Filter, PlanRequest, ProviderSet};
+        use crate::provider::ScriptedProvider;
+        let model = std::env::var("AI_KIT_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5:7b".into());
+        let mut c = OpenAiCompatConfig::ollama(&model);
+        c.base_url =
+            std::env::var("AI_KIT_OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+        let ollama = Arc::new(OpenAiCompatAdapter::new(c, None, None).unwrap());
+        let mut cards = ollama.discover_models("2026-10-11").await.unwrap();
+        let mut card = cards
+            .drain(..)
+            .find(|c| c.model_id == model)
+            .expect("model not installed");
+        card.max_input_tokens = Some(8192); // Ollama's model list does not say; the owner declares it
+        let cloud = ScriptedProvider::new("cloud", Locality::Saas, &[RequestKind::TextGeneration]);
+        let mut set = ProviderSet::new();
+        set.add(
+            Entry::new(
+                cloud.clone(),
+                ModelCard {
+                    provider_id: "cloud".into(),
+                    model_id: "cloud-model".into(),
+                    ..card.clone()
+                },
+            )
+            .with_prior(0.99),
+        );
+        set.add(Entry::new(ollama, card).with_prior(0.5));
+
+        let label = Label::new(
+            SourceKind::HouseholdFile,
+            &["health"],
+            &[Subject::person("kid", AgeBand::Minor)],
+        );
+        let mut pr = PlanRequest::new(RequestKind::TextGeneration, &label, Purpose::Answer, 1);
+        pr.input_tokens = 20;
+        pr.max_output_tokens = 20;
+        let sink = VecSink::default();
+        let (result, record, plan) = set
+            .run(
+                &pr,
+                &text("Reply with exactly the single word: pong"),
+                &Policy::default(),
+                &sink,
+            )
+            .await;
+        let reply = result.expect("the local model should answer");
+        println!(
+            "plan: {:?}; answered by {}: {:?}",
+            plan.hops.iter().map(|h| &h.provider_id).collect::<Vec<_>>(),
+            reply.model_served,
+            out(&reply)
+        );
+        assert!(out(&reply).to_lowercase().contains("pong"));
+        assert_eq!(
+            cloud.calls(),
+            0,
+            "private content with no egress rule must never reach the cloud"
+        );
+        assert!(
+            plan.rejected
+                .iter()
+                .any(|r| r.provider_id == "cloud" && r.filter == Filter::Egress),
+            "{:?}",
+            plan.rejected
+        );
+        assert!(record.attempts.iter().all(|a| !a.locality.leaves_home()));
+        assert!(
+            sink.0.lock().unwrap().is_empty(),
+            "a purely local answer needs no egress audit record"
+        );
     }
 }

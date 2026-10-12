@@ -395,9 +395,9 @@ impl ProviderSet {
             }
             // 5. residency (only matters once content leaves the home)
             if let Some(allowed) = &pr.allowed_regions {
-                if info.locality.leaves_home()
-                    && !(!e.regions.is_empty() && e.regions.iter().all(|r| allowed.contains(r)))
-                {
+                let region_known_and_allowed =
+                    !e.regions.is_empty() && e.regions.iter().all(|r| allowed.contains(r));
+                if info.locality.leaves_home() && !region_known_and_allowed {
                     reject(
                         Filter::Residency,
                         "its region is unknown or not allowed".into(),
