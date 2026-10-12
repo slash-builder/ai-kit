@@ -6,6 +6,9 @@
 //! variables, argv or a config file** (hearth `docs/encryption.md` section 3.5, CLUS-107, QR-259). A secret is a [`Secret`]: it has no
 //! `Display`, its `Debug` is redacted, and errors here carry the credential's *name*, never its content.
 
+pub mod conformance;
+pub use conformance::{assert_conforms, CredentialFixture, SetFn, Setup};
+
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -136,6 +139,9 @@ impl InMemoryCredentials {
 
 impl CredentialSource for InMemoryCredentials {
     fn get(&self, name: &str) -> Result<Secret, CredentialError> {
+        if !plain_name(name) {
+            return Err(CredentialError::BadName(name.to_string()));
+        }
         self.0
             .get(name)
             .filter(|v| !v.trim().is_empty())
@@ -235,6 +241,187 @@ mod tests {
         assert!(InMemoryCredentials::default()
             .get("ANTHROPIC_TEST_CRED_NAME")
             .is_err());
+    }
+
+    // ---- the shared contract, run against the kit's own sources ----
+
+    type Shared = std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>;
+
+    struct InMemoryFixture;
+    impl CredentialFixture for InMemoryFixture {
+        fn name(&self) -> &'static str {
+            "in-memory"
+        }
+        fn setup(&self, entries: &[(&str, &str)]) -> Setup {
+            use std::sync::{Arc, Mutex};
+            let store: Shared = Arc::new(Mutex::new(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+            struct Live(Shared);
+            impl CredentialSource for Live {
+                fn get(&self, name: &str) -> Result<Secret, CredentialError> {
+                    InMemoryCredentials(self.0.lock().unwrap().clone()).get(name)
+                }
+            }
+            let w = store.clone();
+            Setup {
+                source: Box::new(Live(store)),
+                set: Box::new(move |k, v| {
+                    w.lock().unwrap().insert(k.to_string(), v.to_string());
+                }),
+                guard: Box::new(()),
+            }
+        }
+    }
+
+    #[test]
+    fn the_in_memory_source_keeps_the_contract() {
+        assert_conforms(&InMemoryFixture);
+    }
+
+    #[cfg(unix)]
+    struct DirFixture;
+    #[cfg(unix)]
+    impl CredentialFixture for DirFixture {
+        fn name(&self) -> &'static str {
+            "directory"
+        }
+        fn setup(&self, entries: &[(&str, &str)]) -> Setup {
+            let d = tempfile::tempdir().unwrap();
+            for (k, v) in entries {
+                write(d.path(), k, v, 0o600);
+            }
+            let dir = d.path().to_path_buf();
+            Setup {
+                source: Box::new(DirCredentialSource::new(&dir)),
+                set: Box::new(move |k, v| write(&dir, k, v, 0o600)),
+                guard: Box::new(d),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_directory_source_keeps_the_contract() {
+        assert_conforms(&DirFixture);
+    }
+
+    // ---- the contract catches sources that break it (each of these is a real mistake someone could make) ----
+
+    /// A source that wraps a good one and breaks exactly one property.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Break {
+        EnvFallback,
+        LeaksInError,
+        AcceptsPathNames,
+        NoTrim,
+        ReturnsBlank,
+        CachesForever,
+    }
+    struct Broken(Break);
+    impl CredentialFixture for Broken {
+        fn name(&self) -> &'static str {
+            "broken"
+        }
+        fn setup(&self, entries: &[(&str, &str)]) -> Setup {
+            use std::sync::{Arc, Mutex};
+            let kind = self.0;
+            let store: Shared = Arc::new(Mutex::new(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+            let first_seen: Shared = Arc::default();
+            struct Src(Break, Shared, Shared);
+            impl CredentialSource for Src {
+                fn get(&self, name: &str) -> Result<Secret, CredentialError> {
+                    let kind = self.0;
+                    if kind == Break::EnvFallback {
+                        if let Ok(v) = std::env::var(name.replace('-', "_").to_uppercase()) {
+                            return Ok(Secret::new(v));
+                        }
+                    }
+                    if !plain_name(name) && kind != Break::AcceptsPathNames {
+                        // a leaky error names the credential's value in the bad-name message
+                        let leak = self
+                            .1
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .max_by_key(|v| v.len())
+                            .cloned()
+                            .unwrap_or_default();
+                        return Err(CredentialError::BadName(if kind == Break::LeaksInError {
+                            format!("{name} (store holds: {leak})")
+                        } else {
+                            name.to_string()
+                        }));
+                    }
+                    let store = self.1.lock().unwrap();
+                    let Some(v) = store.get(name).cloned() else {
+                        return Err(CredentialError::Unconfigured(name.to_string()));
+                    };
+                    if kind != Break::ReturnsBlank && v.trim().is_empty() {
+                        return Err(CredentialError::Empty(name.to_string()));
+                    }
+                    let v = if kind == Break::NoTrim {
+                        v
+                    } else {
+                        v.trim().to_string()
+                    };
+                    if kind == Break::CachesForever {
+                        let mut seen = self.2.lock().unwrap();
+                        return Ok(Secret::new(
+                            seen.entry(name.to_string()).or_insert(v).clone(),
+                        ));
+                    }
+                    Ok(Secret::new(v))
+                }
+            }
+            let w = store.clone();
+            Setup {
+                source: Box::new(Src(kind, store, first_seen)),
+                set: Box::new(move |k, v| {
+                    w.lock().unwrap().insert(k.to_string(), v.to_string());
+                }),
+                guard: Box::new(()),
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "environment variable must never supply")]
+    fn the_contract_catches_an_environment_fallback() {
+        assert_conforms(&Broken(Break::EnvFallback));
+    }
+    #[test]
+    #[should_panic(expected = "an error's Display contains the stored value")]
+    fn the_contract_catches_a_value_leaked_into_an_error() {
+        assert_conforms(&Broken(Break::LeaksInError));
+    }
+    #[test]
+    #[should_panic(expected = "must be BadName")]
+    fn the_contract_catches_a_source_that_accepts_path_names() {
+        assert_conforms(&Broken(Break::AcceptsPathNames));
+    }
+    #[test]
+    #[should_panic(expected = "surrounding whitespace must be trimmed")]
+    fn the_contract_catches_untrimmed_values() {
+        assert_conforms(&Broken(Break::NoTrim));
+    }
+    #[test]
+    #[should_panic(expected = "never a usable secret")]
+    fn the_contract_catches_a_blank_credential_returned_as_a_secret() {
+        assert_conforms(&Broken(Break::ReturnsBlank));
+    }
+    #[test]
+    #[should_panic(expected = "rotated credential must be seen")]
+    fn the_contract_catches_a_source_that_caches_forever() {
+        assert_conforms(&Broken(Break::CachesForever));
     }
 
     #[test]
