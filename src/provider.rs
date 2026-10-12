@@ -101,7 +101,7 @@ impl ProviderError {
 
 /// One place a request can run.
 #[async_trait]
-pub trait ProviderAdapter: Send + Sync {
+pub trait ProviderAdapter: Send + Sync + std::fmt::Debug {
     fn info(&self) -> &ProviderInfo;
     /// The model this adapter uses for requests of its kinds (recorded in the audit trail; the reply says what was actually served).
     fn model_id(&self) -> &str;
@@ -288,6 +288,7 @@ pub async fn run_chain_recorded(
 }
 
 /// A provider that answers from a script. For tests and the conformance suite.
+#[derive(Debug)]
 pub struct ScriptedProvider {
     info: ProviderInfo,
     model: String,

@@ -57,3 +57,6 @@ pub mod anthropic;
 pub mod gemini;
 #[cfg(feature = "provider-openai-compat")]
 pub mod openai_compat;
+
+#[cfg(test)]
+mod conformance_tests;

@@ -64,6 +64,8 @@
 pub mod backends;
 pub mod budget;
 pub mod cache;
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
 pub mod credentials;
 pub mod egress;
 pub mod error;

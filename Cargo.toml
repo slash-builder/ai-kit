@@ -121,6 +121,9 @@ provider-openai-compat = ["dep:reqwest"]
 # Google Gemini (generateContent and embedContent) as a ProviderAdapter. Off by default; mocks only, no key exists yet.
 provider-gemini = ["dep:reqwest"]
 
+# The provider conformance suite (src/conformance.rs) for adapters written outside this crate. No extra dependencies.
+conformance = []
+
 [dev-dependencies]
 # Test fixtures
 tokio-test = "0.4"
