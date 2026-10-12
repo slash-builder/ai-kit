@@ -75,6 +75,15 @@ pub enum AiKitError {
     )]
     RequiresShareable { request_kind: String },
 
+    /// Nothing configured, credentialed and healthy could serve this request, and the cause is not the content's label (that is
+    /// [`AiKitError::RequiresShareable`]). `reason` names the filters that excluded every provider (for example `Budget, Health`);
+    /// it never names a provider, a model or any content.
+    #[error("No eligible provider for '{request_kind}': {reason}")]
+    NoEligibleProvider {
+        request_kind: String,
+        reason: String,
+    },
+
     /// Model integrity verification failed (BLAKE3 hash mismatch).
     #[error("Model integrity check failed for {model_id}: expected hash {expected}, got {actual}")]
     IntegrityCheckFailed {
@@ -196,6 +205,7 @@ impl AiKitError {
             AiKitError::InvalidParams { .. } => C::InvalidParams,
             AiKitError::UnsupportedKind { .. } => C::RequestKindUnsupported,
             AiKitError::RequiresShareable { .. } => C::RequiresShareable,
+            AiKitError::NoEligibleProvider { .. } => C::NoEligibleProvider,
             AiKitError::RequestTooLarge { .. } => C::RequestTooLarge,
             AiKitError::RemoteBackendError { .. } => C::RemoteBackendFailed,
             AiKitError::ModelLoadFailed { .. } | AiKitError::IntegrityCheckFailed { .. } => {

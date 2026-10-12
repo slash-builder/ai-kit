@@ -82,6 +82,7 @@ pub mod provider;
 pub mod providers;
 pub mod registry;
 pub mod routed;
+pub mod router;
 pub mod service;
 pub mod types;
 
@@ -107,6 +108,7 @@ pub use modality::{
     SpeechParams, TextService, TranscriptResponse,
 };
 pub use routed::{MultiHybridService, RoutedRequest};
+pub use router::{Call, EgressRouter, EgressRouterBuilder, RouteOutcome};
 pub use service::InferenceService;
 pub use types::{InferenceParams, InferenceResponse, ModelFile, ModelMetadata};
 

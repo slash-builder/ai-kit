@@ -22,7 +22,10 @@
 //! breakers and scorecards are updated from the audit record, including from requests that failed.
 
 use crate::budget::Pricing;
-use crate::egress::{AuditSink, EgressRecord, Label, Locality, Outcome, Policy, Purpose, Verdict};
+use crate::egress::{
+    Attempt, AuditSink, DenyReason, EgressRecord, Label, Locality, Outcome, Policy, Purpose,
+    Verdict,
+};
 use crate::error::AiKitError;
 use crate::modality::{Request, RequestKind};
 use crate::model_card::ModelCard;
@@ -476,6 +479,61 @@ impl ProviderSet {
         })
     }
 
+    /// The attempts to record for providers the plan excluded on egress grounds (and for hops held back for the owner's answer):
+    /// nothing was sent to them, and the audit trail must still say what was refused and under which rules.
+    fn planner_denials(
+        &self,
+        plan: &Plan,
+        pr: &PlanRequest<'_>,
+        kind: RequestKind,
+        policy: &Policy,
+    ) -> Vec<Attempt> {
+        let mut out = Vec::new();
+        let mut push = |e: &Entry, outcome: Outcome, rules: Vec<(String, u32)>| {
+            let info = e.adapter.info();
+            out.push(Attempt {
+                n: 0,
+                provider_id: info.provider_id.clone(),
+                locality: info.locality,
+                model_id: e.adapter.model_id().to_string(),
+                outcome,
+                error_class: None,
+                bytes_sent: 0,
+                bytes_received: 0,
+                rules,
+            });
+        };
+        for rej in plan.rejected.iter().filter(|r| r.filter == Filter::Egress) {
+            let Some(e) = self
+                .entries
+                .iter()
+                .find(|e| e.adapter.info().provider_id == rej.provider_id)
+            else {
+                continue;
+            };
+            match policy.decide(pr.label, e.adapter.info(), pr.purpose, kind, pr.now) {
+                Verdict::Deny { reason, rules } => {
+                    let outcome = match reason {
+                        DenyReason::RuleDenies => Outcome::DeniedPolicy,
+                        DenyReason::Unlabelled | DenyReason::CredentialsNeverLeave => {
+                            Outcome::BlockedLabel
+                        }
+                    };
+                    push(e, outcome, rules);
+                }
+                Verdict::AskUser { .. } => push(e, Outcome::BlockedLabel, Vec::new()),
+                // the planner and the engine use the same pure decision; an allow here would mean they disagree
+                Verdict::Allow { .. } => {}
+            }
+        }
+        for hop in plan.hops.iter().filter(|h| h.needs_consent) {
+            if let Some(e) = self.find(hop) {
+                push(e, Outcome::BlockedLabel, Vec::new());
+            }
+        }
+        out
+    }
+
     /// Plan, run the hops that need no consent through [`run_chain_recorded`], and learn from what happened.
     pub async fn run(
         &self,
@@ -492,7 +550,28 @@ impl ProviderSet {
             .collect();
         let mut cfg = ChainConfig::new(pr.purpose, pr.now);
         cfg.interactive = false;
-        let (result, record) = run_chain_recorded(&chain, policy, pr.label, req, &cfg, sink).await;
+        // The chain's own sink is a discard: the record is completed with the planner's denials below, then sent once.
+        let (mut result, mut record) =
+            run_chain_recorded(&chain, policy, pr.label, req, &cfg, &DiscardSink).await;
+        // A provider the planner removed for egress reasons never reaches the chain, so the chain cannot record that it was denied.
+        // The record of what was refused is part of the audit trail, so add those attempts here, ahead of the chain's own.
+        let mut attempts = self.planner_denials(&plan, pr, req.kind(), policy);
+        attempts.append(&mut record.attempts);
+        for (i, a) in attempts.iter_mut().enumerate() {
+            a.n = i as u32 + 1;
+        }
+        record.attempts = attempts;
+        if record.is_worth_keeping() {
+            sink.record(record.clone());
+        }
+        if chain.is_empty() {
+            // The planner removes denied providers before the chain runs, so an empty chain is not "no provider handles this kind":
+            // say why nothing could run.
+            result = match result {
+                Err(e) => Err(no_runnable_error(&plan, req.kind(), e)),
+                ok => ok,
+            };
+        }
         for a in &record.attempts {
             let Some(e) = self
                 .entries
@@ -529,6 +608,41 @@ impl ProviderSet {
             }
         }
         (result, record, plan)
+    }
+}
+
+struct DiscardSink;
+impl AuditSink for DiscardSink {
+    fn record(&self, _record: EgressRecord) {}
+}
+
+/// Why a plan with nothing to run produced no answer. A privacy denial (or a hop that needs the owner's answer first) is
+/// `RequiresShareable`, whatever else also excluded providers: that is the answer the caller can act on. If nothing but the request
+/// kind excluded anyone, keep the executor's `UnsupportedKind`. Otherwise name the filters.
+fn no_runnable_error(plan: &Plan, kind: RequestKind, fallback: AiKitError) -> AiKitError {
+    let egress = plan.rejected.iter().any(|r| r.filter == Filter::Egress)
+        || plan.hops.iter().any(|h| h.needs_consent);
+    if egress {
+        return AiKitError::RequiresShareable {
+            request_kind: kind.as_str().to_string(),
+        };
+    }
+    let mut filters: Vec<Filter> = Vec::new();
+    for r in &plan.rejected {
+        if r.filter != Filter::Kind && !filters.contains(&r.filter) {
+            filters.push(r.filter);
+        }
+    }
+    if filters.is_empty() {
+        return fallback;
+    }
+    AiKitError::NoEligibleProvider {
+        request_kind: kind.as_str().to_string(),
+        reason: filters
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -1025,7 +1139,25 @@ mod tests {
             (1, 1, 0),
             "the denied provider is never called"
         );
-        assert_eq!(record.attempts.len(), 2);
+        // the two hops that ran, plus the planner's denial of the third, recorded first and never sent anything
+        assert_eq!(record.attempts.len(), 3);
+        let d = &record.attempts[0];
+        assert_eq!(
+            (d.provider_id.as_str(), d.outcome, d.bytes_sent),
+            ("denied", Outcome::DeniedPolicy, 0)
+        );
+        assert_eq!(d.rules.first().map(|r| r.0.as_str()), Some("no-denied"));
+        assert_eq!(
+            record.attempts.iter().map(|a| a.n).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "attempts are numbered in order"
+        );
+        assert!(record.is_worth_keeping());
+        assert_eq!(
+            sink.0.lock().unwrap().len(),
+            1,
+            "sent to the sink once, complete"
+        );
         // the local provider failed once: its scorecard shows it, and its breaker (threshold 3) is still closed
         assert_eq!(
             *set.entries[0].scorecard.lock().unwrap(),
