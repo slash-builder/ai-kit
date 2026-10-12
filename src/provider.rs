@@ -144,6 +144,20 @@ pub async fn run_chain(
     cfg: &ChainConfig,
     sink: &dyn AuditSink,
 ) -> Result<(ProviderReply, EgressRecord), AiKitError> {
+    let (result, record) = run_chain_recorded(chain, policy, label, req, cfg, sink).await;
+    result.map(|reply| (reply, record))
+}
+
+/// Like [`run_chain`], but the audit record is returned **whether or not the request succeeded**, so a caller (the planner's health and
+/// scorecard bookkeeping) can learn from failed hops too.
+pub async fn run_chain_recorded(
+    chain: &[Arc<dyn ProviderAdapter>],
+    policy: &Policy,
+    label: &Label,
+    req: &Request,
+    cfg: &ChainConfig,
+    sink: &dyn AuditSink,
+) -> (Result<ProviderReply, AiKitError>, EgressRecord) {
     let kind = req.kind();
     let mut attempts: Vec<Attempt> = Vec::new();
     let mut remote_hops = 0u32;
@@ -254,8 +268,8 @@ pub async fn run_chain(
     if record.is_worth_keeping() {
         sink.record(record.clone());
     }
-    match result {
-        Some(reply) => Ok((reply, record)),
+    let outcome = match result {
+        Some(reply) => Ok(reply),
         None if !any_capable => Err(AiKitError::UnsupportedKind {
             request_kind: kind.as_str().to_string(),
             reason: "no provider in the chain handles this kind".into(),
@@ -269,7 +283,8 @@ pub async fn run_chain(
                 e.class().to_string()
             }),
         }),
-    }
+    };
+    (outcome, record)
 }
 
 /// A provider that answers from a script. For tests and the conformance suite.

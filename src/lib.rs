@@ -70,6 +70,7 @@ pub mod error;
 pub mod hybrid;
 pub mod modality;
 pub mod model_card;
+pub mod planner;
 pub mod provider;
 #[cfg(any(
     feature = "provider-anthropic",
