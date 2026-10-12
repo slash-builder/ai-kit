@@ -4,24 +4,35 @@
 def RUST_IMAGE = 'rust:1.94'
 
 // Run `body` on an agent with `label`, as an optional leg (see the comment above the legs).
-//   - The leg fails, or no agent picks it up, or it runs too long: mark the build UNSTABLE, do not fail it.
-//   - An offline agent is the common case (the Macs are moved around). `nodesByLabel` is not available on
-//     our controller, so allocation is bounded by an inactivity timeout instead: the build logs steadily
-//     while a leg runs, so 6 minutes of silence means nothing is running and the leg is abandoned.
-//     The outer timeout is the hard cap on a leg that does run.
+//   - No agent picks the leg up (the Macs are moved around, so this is the common case): the stage is marked
+//     UNSTABLE (yellow) but the BUILD stays SUCCESS, so the PR check stays green. Nothing was verified on that
+//     OS, and the stage colour says so.
+//   - The leg ran and failed, or ran past its cap: the build goes UNSTABLE. GitHub shows that as a failed
+//     check, which is right: a real failure on a platform should be looked at. Publish still runs on main.
+//   - `nodesByLabel` is not available on our controller, so "no agent" is detected by an inactivity timeout:
+//     the build logs steadily while any leg runs, so 6 minutes of silence before the leg has started means
+//     nothing is running it.
 // Never use this for the linux legs: those are the gate.
 def optionalLeg(String name, String label, int minutes, Closure body) {
+  def started = false
   try {
     timeout(time: minutes, unit: 'MINUTES') {
       timeout(time: 6, unit: 'MINUTES', activity: true) {
         node(label) {
+          started = true
           checkout scm
           body()
         }
       }
     }
   } catch (err) {
-    unstable("${name}: ${err.getMessage()}")
+    if (started) {
+      unstable("${name}: ${err.getMessage()}")
+    } else {
+      catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE', message: "${name}: no '${label}' agent picked this up, leg skipped") {
+        error("${name}: no '${label}' agent picked this up, leg skipped")
+      }
+    }
   }
 }
 
@@ -146,8 +157,8 @@ pipeline {
         //      later stages once the build is FAILURE -- so one failing leg skipped Publish.
         //   2. A stage-level `agent { label 'saturn' }` waits for an agent with no limit, so an
         //      offline saturn hung the whole build (and the PR check) until someone cancelled it.
-        // optionalLeg() fixes both: a leg that cannot get an agent is abandoned and the build goes
-        // UNSTABLE (yellow, not red); a leg that runs and fails does the same. A leg that takes too
+        // optionalLeg() fixes both: a leg that cannot get an agent is abandoned (yellow stage, build still
+        // green); a leg that runs and fails makes the build UNSTABLE and Publish still runs. A leg that takes too
         // long is stopped. Publish still runs on main, and the unstable result stays visible.
         stage('windows-amd64') {
           steps {
