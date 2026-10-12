@@ -4,19 +4,20 @@
 def RUST_IMAGE = 'rust:1.94'
 
 // Run `body` on an agent with `label`, as an optional leg (see the comment above the legs).
-//   - No online agent with the label: skip the leg, mark the build UNSTABLE.
-//   - The leg fails or times out: mark the build UNSTABLE, do not fail it.
+//   - The leg fails, or no agent picks it up, or it runs too long: mark the build UNSTABLE, do not fail it.
+//   - An offline agent is the common case (the Macs are moved around). `nodesByLabel` is not available on
+//     our controller, so allocation is bounded by an inactivity timeout instead: the build logs steadily
+//     while a leg runs, so 6 minutes of silence means nothing is running and the leg is abandoned.
+//     The outer timeout is the hard cap on a leg that does run.
 // Never use this for the linux legs: those are the gate.
 def optionalLeg(String name, String label, int minutes, Closure body) {
-  if (nodesByLabel(label: label).isEmpty()) {
-    unstable("${name}: no online '${label}' agent, leg skipped")
-    return
-  }
   try {
     timeout(time: minutes, unit: 'MINUTES') {
-      node(label) {
-        checkout scm
-        body()
+      timeout(time: 6, unit: 'MINUTES', activity: true) {
+        node(label) {
+          checkout scm
+          body()
+        }
       }
     }
   } catch (err) {
@@ -145,7 +146,7 @@ pipeline {
         //      later stages once the build is FAILURE -- so one failing leg skipped Publish.
         //   2. A stage-level `agent { label 'saturn' }` waits for an agent with no limit, so an
         //      offline saturn hung the whole build (and the PR check) until someone cancelled it.
-        // optionalLeg() fixes both: no online agent -> the leg is skipped and the build goes
+        // optionalLeg() fixes both: a leg that cannot get an agent is abandoned and the build goes
         // UNSTABLE (yellow, not red); a leg that runs and fails does the same. A leg that takes too
         // long is stopped. Publish still runs on main, and the unstable result stays visible.
         stage('windows-amd64') {
