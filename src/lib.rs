@@ -62,10 +62,24 @@
 
 #[cfg(any(feature = "candle-base", feature = "claude-proxy"))]
 pub mod backends;
+pub mod budget;
 pub mod cache;
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
+pub mod credentials;
+pub mod egress;
 pub mod error;
 pub mod hybrid;
 pub mod modality;
+pub mod model_card;
+pub mod planner;
+pub mod provider;
+#[cfg(any(
+    feature = "provider-anthropic",
+    feature = "provider-openai-compat",
+    feature = "provider-gemini"
+))]
+pub mod providers;
 pub mod registry;
 pub mod routed;
 pub mod service;

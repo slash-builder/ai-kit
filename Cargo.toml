@@ -112,6 +112,18 @@ cuda = ["candle", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cud
 # time — see `src/backends/claude_proxy.rs` module doc.
 claude-proxy = ["dep:reqwest"]
 
+# The Claude Messages API as a ProviderAdapter (see src/providers/anthropic.rs). Off by default; tested against mocks only, no key exists yet.
+provider-anthropic = ["dep:reqwest"]
+
+# An adapter for any OpenAI-compatible server (Ollama, llama.cpp server, a SaaS gateway): chat completions and embeddings. Off by default.
+provider-openai-compat = ["dep:reqwest"]
+
+# Google Gemini (generateContent and embedContent) as a ProviderAdapter. Off by default; mocks only, no key exists yet.
+provider-gemini = ["dep:reqwest"]
+
+# The provider conformance suite (src/conformance.rs) for adapters written outside this crate. No extra dependencies.
+conformance = []
+
 [dev-dependencies]
 # Test fixtures
 tokio-test = "0.4"
